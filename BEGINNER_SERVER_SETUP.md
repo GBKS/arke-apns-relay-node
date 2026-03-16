@@ -17,7 +17,7 @@ You need:
 - SSH access to your Hetzner server
 - A DNS A record for `relay.arke.cash` pointing to your server's IP address (add this in your DNS provider before continuing)
 - Your APNs `.p8` key file on your local machine (see next section)
-- The `mailbox_server.proto` file from the [`bark`](https://gitlab.com/ark-bitcoin/bark) repository on your local machine
+  - The `mailbox_server.proto` **and its required `core.proto`** files from the [`bark`](https://gitlab.com/ark-bitcoin/bark) repository on your local machine (both are required)
 - These relay values ready:
   - `APNS_KEY_ID`
   - `APNS_TEAM_ID`
@@ -123,12 +123,14 @@ sudo -u arke-relay npm ci --omit=dev
 
 Expected result: install finishes without errors.
 
-### Copy the gRPC proto file
 
-From your local machine, upload the proto file:
+### Copy the gRPC proto files
+
+From your local machine, upload both proto files:
 
 ```bash
 scp /local/path/to/mailbox_server.proto <your-user>@<your-server-ip>:/tmp/mailbox_server.proto
+scp /local/path/to/core.proto <your-user>@<your-server-ip>:/tmp/core.proto
 ```
 
 Back on server shell:
@@ -136,10 +138,11 @@ Back on server shell:
 ```bash
 sudo -u arke-relay mkdir -p /opt/arke-relay/app/protos
 sudo install -o arke-relay -g arke-relay -m 644 /tmp/mailbox_server.proto /opt/arke-relay/app/protos/mailbox_server.proto
-rm /tmp/mailbox_server.proto
+sudo install -o arke-relay -g arke-relay -m 644 /tmp/core.proto /opt/arke-relay/app/protos/core.proto
+rm /tmp/mailbox_server.proto /tmp/core.proto
 ```
 
-Expected result: file exists at `/opt/arke-relay/app/protos/mailbox_server.proto`.
+Expected result: files exist at `/opt/arke-relay/app/protos/mailbox_server.proto` and `/opt/arke-relay/app/protos/core.proto`.
 
 ---
 

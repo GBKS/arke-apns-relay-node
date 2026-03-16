@@ -80,8 +80,11 @@ main() {
   prompt_required APNS_KEY_FILE_LOCAL "Local path to AuthKey_XXXXXX.p8: "
   check_file_exists "$APNS_KEY_FILE_LOCAL"
 
+
   prompt_required PROTO_FILE_LOCAL "Local path to mailbox_server.proto: "
   check_file_exists "$PROTO_FILE_LOCAL"
+  prompt_required CORE_PROTO_FILE_LOCAL "Local path to core.proto (required by mailbox_server.proto): "
+  check_file_exists "$CORE_PROTO_FILE_LOCAL"
 
   prompt_required APNS_KEY_ID "APNS_KEY_ID: "
   prompt_required APNS_TEAM_ID "APNS_TEAM_ID: "
@@ -110,29 +113,33 @@ main() {
   local ssh_target
   ssh_target="$SSH_USER@$SSH_HOST"
 
-  local remote_proto_tmp remote_key_tmp
+  local remote_proto_tmp remote_core_proto_tmp remote_key_tmp
   remote_proto_tmp="/tmp/mailbox_server.proto.$RANDOM.$RANDOM"
+  remote_core_proto_tmp="/tmp/core.proto.$RANDOM.$RANDOM"
   remote_key_tmp="/tmp/apns.p8.$RANDOM.$RANDOM"
 
   local uploaded_files
-  uploaded_files="0"
+
+
 
   cleanup_remote_tmp() {
     if [[ "$uploaded_files" == "1" ]]; then
-      ssh "$ssh_target" "rm -f '$remote_proto_tmp' '$remote_key_tmp'" >/dev/null 2>&1 || true
+      ssh "$ssh_target" "rm -f '$remote_proto_tmp' '$remote_core_proto_tmp' '$remote_key_tmp'" >/dev/null 2>&1 || true
     fi
   }
 
   trap cleanup_remote_tmp EXIT
 
-  echo "Uploading proto and APNs key..."
+
+  echo "Uploading proto files and APNs key..."
   scp "$PROTO_FILE_LOCAL" "$ssh_target:$remote_proto_tmp"
+  scp "$CORE_PROTO_FILE_LOCAL" "$ssh_target:$remote_core_proto_tmp"
   scp "$APNS_KEY_FILE_LOCAL" "$ssh_target:$remote_key_tmp"
   uploaded_files="1"
 
   echo "Running remote setup..."
   ssh "$ssh_target" \
-    "DOMAIN='$DOMAIN' REPO_URL='$REPO_URL' REMOTE_BASE='$REMOTE_BASE' APNS_KEY_ID='$APNS_KEY_ID' APNS_TEAM_ID='$APNS_TEAM_ID' APNS_TOPIC='$APNS_TOPIC' APNS_PRODUCTION='$APNS_PRODUCTION' RELAY_API_TOKEN='$RELAY_API_TOKEN' INSTALL_CERT='$INSTALL_CERT' CERTBOT_EMAIL='$CERTBOT_EMAIL' CONFIGURE_UFW='$CONFIGURE_UFW' REMOTE_PROTO_TMP='$remote_proto_tmp' REMOTE_KEY_TMP='$remote_key_tmp' bash -s" <<'REMOTE_SCRIPT'
+    "DOMAIN='$DOMAIN' REPO_URL='$REPO_URL' REMOTE_BASE='$REMOTE_BASE' APNS_KEY_ID='$APNS_KEY_ID' APNS_TEAM_ID='$APNS_TEAM_ID' APNS_TOPIC='$APNS_TOPIC' APNS_PRODUCTION='$APNS_PRODUCTION' RELAY_API_TOKEN='$RELAY_API_TOKEN' INSTALL_CERT='$INSTALL_CERT' CERTBOT_EMAIL='$CERTBOT_EMAIL' CONFIGURE_UFW='$CONFIGURE_UFW' REMOTE_PROTO_TMP='$remote_proto_tmp' REMOTE_CORE_PROTO_TMP='$remote_core_proto_tmp' REMOTE_KEY_TMP='$remote_key_tmp' bash -s" <<'REMOTE_SCRIPT'
 set -euo pipefail
 
 if ! command -v sudo >/dev/null 2>&1; then
@@ -179,10 +186,12 @@ fi
 
 sudo -u arke-relay npm --prefix "$REMOTE_BASE/app" ci --omit=dev
 
+
 sudo -u arke-relay mkdir -p "$REMOTE_BASE/app/protos"
 sudo install -o arke-relay -g arke-relay -m 644 "$REMOTE_PROTO_TMP" "$REMOTE_BASE/app/protos/mailbox_server.proto"
+sudo install -o arke-relay -g arke-relay -m 644 "$REMOTE_CORE_PROTO_TMP" "$REMOTE_BASE/app/protos/core.proto"
 sudo install -o arke-relay -g arke-relay -m 600 "$REMOTE_KEY_TMP" "$REMOTE_BASE/keys/apns.p8"
-rm -f "$REMOTE_PROTO_TMP" "$REMOTE_KEY_TMP"
+rm -f "$REMOTE_PROTO_TMP" "$REMOTE_CORE_PROTO_TMP" "$REMOTE_KEY_TMP"
 
 sudo tee "$REMOTE_BASE/app/.env" > /dev/null <<EOF
 PROTO_PATH=$REMOTE_BASE/app/protos/mailbox_server.proto

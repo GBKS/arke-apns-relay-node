@@ -1,6 +1,6 @@
 # Node.js Mailbox Relay Prototype
 
-First-draft mailbox → APNs relay prototype.
+First-draft mailbox → APNs relay prototype. For the Ark implementation by [Second](https://second.tech) ([repo](https://gitlab.com/ark-bitcoin/bark)).
 
 ## Done
 
@@ -76,13 +76,16 @@ npm start
 
 ## Automated server setup (Hetzner runbook script)
 
+
 If you want one command instead of manual copy/paste, run:
 
 ```bash
 ./scripts/setup-relay-server.sh
 ```
 
-It runs from your local machine, prompts for required values, uploads your `.p8` key and `mailbox_server.proto`, and configures the remote server over SSH (node, systemd, nginx, optional certbot, optional ufw).
+It runs from your local machine, prompts for required values, uploads your `.p8` key and both `mailbox_server.proto` and its required `core.proto`, and configures the remote server over SSH (node, systemd, nginx, optional certbot, optional ufw).
+
+**Important:** You must have both `mailbox_server.proto` and `core.proto` (from the [`bark`](https://gitlab.com/ark-bitcoin/bark) repo) in the same directory before running the setup script. Both files are required for the relay to start.
 
 ## Notes
 

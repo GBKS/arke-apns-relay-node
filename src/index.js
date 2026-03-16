@@ -153,50 +153,47 @@ async function processMailboxMessage(message, mailboxId, sender, store, config) 
   metricMessages.inc();
 
   const recipients = await store.getDevices(mailboxId);
+  let successfulSends = 0;
+
   if (recipients.length === 0) {
     logger.warn({ mailboxId, checkpoint }, 'no registered devices, skipping APNs send');
-    return;
-  }
-
-  if (config.dryRun) {
+  } else if (config.dryRun) {
     logger.info({ checkpoint, vtxoCount, recipientCount: recipients.length }, 'dry-run enabled, skipping APNs send');
-    await store.set(mailboxId, checkpoint);
-    return;
-  }
-
-  let successfulSends = 0;
-  for (const recipient of recipients) {
-    try {
-      await sender.sendMailboxNotification({
-        checkpoint,
-        vtxoCount,
-        mailboxId,
-        deviceToken: recipient.device_token,
-        topic: recipient.apns_topic
-      });
-      successfulSends += 1;
-      metricApnsSuccess.inc();
-    } catch (err) {
-      if (err instanceof StaleDeviceTokenError) {
-        logger.warn(
-          { deviceTokenSuffix: recipient.device_token.slice(-8), reason: err.apnsReason },
-          'removing stale APNs device token'
-        );
-        await store.unregisterDevice(mailboxId, recipient.device_token);
-        await refreshRegistrationMetric(store);
-      } else {
-        metricApnsFailure.inc();
-        logger.error(
-          { err, checkpoint, deviceTokenSuffix: recipient.device_token.slice(-8) },
-          'failed to send APNs notification to device'
-        );
+    successfulSends = recipients.length; // treat as success for checkpoint
+  } else {
+    for (const recipient of recipients) {
+      try {
+        await sender.sendMailboxNotification({
+          checkpoint,
+          vtxoCount,
+          mailboxId,
+          deviceToken: recipient.device_token,
+          topic: recipient.apns_topic
+        });
+        successfulSends += 1;
+        metricApnsSuccess.inc();
+      } catch (err) {
+        if (err instanceof StaleDeviceTokenError) {
+          logger.warn(
+            { deviceTokenSuffix: recipient.device_token.slice(-8), reason: err.apnsReason },
+            'removing stale APNs device token'
+          );
+          await store.unregisterDevice(mailboxId, recipient.device_token);
+          await refreshRegistrationMetric(store);
+        } else {
+          metricApnsFailure.inc();
+          logger.error(
+            { err, checkpoint, deviceTokenSuffix: recipient.device_token.slice(-8) },
+            'failed to send APNs notification to device'
+          );
+        }
       }
     }
   }
 
-  if (successfulSends > 0) {
-    await store.set(mailboxId, checkpoint);
-  }
+  // Always advance checkpoint after processing, even if no sends succeeded,
+  // to avoid repeated delivery attempts for the same message.
+  await store.set(mailboxId, checkpoint);
 }
 
 // ─── per-mailbox subscription worker ────────────────────────────────────────
@@ -288,11 +285,14 @@ class MailboxWorker {
     const call = subscribeMailbox(client, this._makeRequest(checkpoint));
     this._currentCall = call;
 
+
     await new Promise((resolve) => {
       call.on('data', async (message) => {
         call.pause();
         try {
           await processMailboxMessage(message, this.mailboxId, this._sender, this._store, this._config);
+        } catch (err) {
+          this._log.error({ err }, 'error processing mailbox message (stream data handler)');
         } finally {
           call.resume();
         }
