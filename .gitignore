@@ -75,6 +75,9 @@ web_modules/
 .env.*
 !.env.example
 
+# APNs private key files
+*.p8
+
 # parcel-bundler cache (https://parceljs.org/)
 .cache
 .parcel-cache

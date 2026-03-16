@@ -35,7 +35,9 @@ If you prefer not to copy/paste the full runbook manually, use the bootstrap scr
 ./scripts/setup-relay-server.sh
 ```
 
-It prompts for the required values, uploads your `.p8` and `mailbox_server.proto`, and configures node, systemd, nginx, optional certbot, and optional firewall rules over SSH.
+It prompts for the required values, uploads your `.p8`, and configures node, systemd, nginx, optional certbot, and optional firewall rules over SSH.
+
+By default, it uses `./protos/mailbox_server.proto` and `./protos/core.proto` from this repo if they exist. If they are missing, it prompts you for local proto file paths.
 
 If you use this script, you can skip to **9) Verify It Works (3 quick checks)** after it finishes.
 

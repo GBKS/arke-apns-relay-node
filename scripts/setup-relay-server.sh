@@ -80,10 +80,25 @@ main() {
   prompt_required APNS_KEY_FILE_LOCAL "Local path to AuthKey_XXXXXX.p8: "
   check_file_exists "$APNS_KEY_FILE_LOCAL"
 
+  # Use repo protos by default when running from project root.
+  local default_proto_path default_core_proto_path
+  default_proto_path="./protos/mailbox_server.proto"
+  default_core_proto_path="./protos/core.proto"
 
-  prompt_required PROTO_FILE_LOCAL "Local path to mailbox_server.proto: "
+  if [[ -f "$default_proto_path" ]]; then
+    PROTO_FILE_LOCAL="$default_proto_path"
+    echo "Using default mailbox_server.proto: $PROTO_FILE_LOCAL"
+  else
+    prompt_required PROTO_FILE_LOCAL "Local path to mailbox_server.proto: "
+  fi
   check_file_exists "$PROTO_FILE_LOCAL"
-  prompt_required CORE_PROTO_FILE_LOCAL "Local path to core.proto (required by mailbox_server.proto): "
+
+  if [[ -f "$default_core_proto_path" ]]; then
+    CORE_PROTO_FILE_LOCAL="$default_core_proto_path"
+    echo "Using default core.proto: $CORE_PROTO_FILE_LOCAL"
+  else
+    prompt_required CORE_PROTO_FILE_LOCAL "Local path to core.proto (required by mailbox_server.proto): "
+  fi
   check_file_exists "$CORE_PROTO_FILE_LOCAL"
 
   prompt_required APNS_KEY_ID "APNS_KEY_ID: "
