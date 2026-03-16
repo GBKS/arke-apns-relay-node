@@ -138,9 +138,24 @@ main() {
   uploaded_files="1"
 
   echo "Running remote setup..."
-  ssh "$ssh_target" \
-    "DOMAIN='$DOMAIN' REPO_URL='$REPO_URL' REMOTE_BASE='$REMOTE_BASE' APNS_KEY_ID='$APNS_KEY_ID' APNS_TEAM_ID='$APNS_TEAM_ID' APNS_TOPIC='$APNS_TOPIC' APNS_PRODUCTION='$APNS_PRODUCTION' RELAY_API_TOKEN='$RELAY_API_TOKEN' INSTALL_CERT='$INSTALL_CERT' CERTBOT_EMAIL='$CERTBOT_EMAIL' CONFIGURE_UFW='$CONFIGURE_UFW' REMOTE_PROTO_TMP='$remote_proto_tmp' REMOTE_CORE_PROTO_TMP='$remote_core_proto_tmp' REMOTE_KEY_TMP='$remote_key_tmp' bash -s" <<'REMOTE_SCRIPT'
+  ssh "$ssh_target" bash -s -- \
+    "$DOMAIN" "$REPO_URL" "$REMOTE_BASE" "$APNS_KEY_ID" "$APNS_TEAM_ID" "$APNS_TOPIC" "$APNS_PRODUCTION" "$RELAY_API_TOKEN" "$INSTALL_CERT" "$CERTBOT_EMAIL" "$CONFIGURE_UFW" "$remote_proto_tmp" "$remote_core_proto_tmp" "$remote_key_tmp" <<'REMOTE_SCRIPT'
 set -euo pipefail
+
+DOMAIN="$1"
+REPO_URL="$2"
+REMOTE_BASE="$3"
+APNS_KEY_ID="$4"
+APNS_TEAM_ID="$5"
+APNS_TOPIC="$6"
+APNS_PRODUCTION="$7"
+RELAY_API_TOKEN="$8"
+INSTALL_CERT="$9"
+CERTBOT_EMAIL="${10}"
+CONFIGURE_UFW="${11}"
+REMOTE_PROTO_TMP="${12}"
+REMOTE_CORE_PROTO_TMP="${13}"
+REMOTE_KEY_TMP="${14}"
 
 if ! command -v sudo >/dev/null 2>&1; then
   echo "sudo is required on the remote server" >&2

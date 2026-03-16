@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 require_cmd() {
   local cmd="$1"
   if ! command -v "$cmd" >/dev/null 2>&1; then
@@ -54,6 +57,32 @@ prompt_yes_no() {
   done
 }
 
+find_latest_backup_dir() {
+  local matches=("$REPO_ROOT"/backup_*)
+  if [[ ! -e "${matches[0]}" ]]; then
+    return 0
+  fi
+
+  ls -td "$REPO_ROOT"/backup_* 2>/dev/null | head -1
+}
+
+upload_remote_file() {
+  local local_path="$1"
+  local ssh_target="$2"
+  local remote_path="$3"
+  local mode="$4"
+  local owner="$5"
+  local temp_name
+
+  temp_name="/tmp/$(basename "$remote_path").$$.$RANDOM"
+  scp "$local_path" "$ssh_target:$temp_name"
+  ssh "$ssh_target" bash -s -- "$temp_name" "$remote_path" "$mode" "$owner" <<'REMOTE_SCRIPT'
+set -euo pipefail
+sudo install -o "$4" -g "$4" -m "$3" "$1" "$2"
+rm -f "$1"
+REMOTE_SCRIPT
+}
+
 main() {
   require_cmd ssh
   require_cmd scp
@@ -63,8 +92,9 @@ main() {
 
   prompt_required SSH_USER "SSH user: "
   prompt_required SSH_HOST "Server host or IP: "
+  prompt_default DOMAIN "Relay domain" "relay.arke.cash"
   prompt_default REMOTE_BASE "Remote base directory" "/opt/arke-relay"
-  prompt_default LOCAL_BACKUP_DIR "Backup directory to restore from" "$(ls -td ./backup_* 2>/dev/null | head -1)"
+  prompt_default LOCAL_BACKUP_DIR "Backup directory to restore from" "$(find_latest_backup_dir)"
 
   if [[ -z "$LOCAL_BACKUP_DIR" || ! -d "$LOCAL_BACKUP_DIR" ]]; then
     echo "Backup directory not found: $LOCAL_BACKUP_DIR" >&2
@@ -84,21 +114,19 @@ main() {
   local ssh_target
   ssh_target="$SSH_USER@$SSH_HOST"
 
-  scp "$LOCAL_BACKUP_DIR/.env" "$ssh_target:$REMOTE_BASE/app/.env"
-  scp "$LOCAL_BACKUP_DIR/apns.p8" "$ssh_target:$REMOTE_BASE/keys/apns.p8"
-  scp "$LOCAL_BACKUP_DIR/relay.db" "$ssh_target:$REMOTE_BASE/data/relay.db"
+  upload_remote_file "$LOCAL_BACKUP_DIR/.env" "$ssh_target" "$REMOTE_BASE/app/.env" 600 arke-relay
+  upload_remote_file "$LOCAL_BACKUP_DIR/apns.p8" "$ssh_target" "$REMOTE_BASE/keys/apns.p8" 600 arke-relay
+  upload_remote_file "$LOCAL_BACKUP_DIR/relay.db" "$ssh_target" "$REMOTE_BASE/data/relay.db" 644 arke-relay
 
   if [[ -f "$LOCAL_BACKUP_DIR/arke-apns-relay.service" ]]; then
-    scp "$LOCAL_BACKUP_DIR/arke-apns-relay.service" "$ssh_target:/tmp/arke-apns-relay.service"
-    ssh "$ssh_target" "sudo mv /tmp/arke-apns-relay.service /etc/systemd/system/arke-apns-relay.service"
+    upload_remote_file "$LOCAL_BACKUP_DIR/arke-apns-relay.service" "$ssh_target" "/etc/systemd/system/arke-apns-relay.service" 644 root
   fi
 
-  if [[ -f "$LOCAL_BACKUP_DIR/nginx-relay.conf" ]]; then
-    scp "$LOCAL_BACKUP_DIR/nginx-relay.conf" "$ssh_target:/tmp/nginx-relay.conf"
-    ssh "$ssh_target" "sudo mv /tmp/nginx-relay.conf /etc/nginx/sites-available/relay.arke.cash"
+  if [[ -f "$LOCAL_BACKUP_DIR/nginx-${DOMAIN}.conf" ]]; then
+    upload_remote_file "$LOCAL_BACKUP_DIR/nginx-${DOMAIN}.conf" "$ssh_target" "/etc/nginx/sites-available/$DOMAIN" 644 root
   fi
 
-  ssh "$ssh_target" "sudo chown arke-relay:arke-relay '$REMOTE_BASE/app/.env' '$REMOTE_BASE/keys/apns.p8' '$REMOTE_BASE/data/relay.db' && sudo chmod 600 '$REMOTE_BASE/app/.env' '$REMOTE_BASE/keys/apns.p8' && sudo systemctl daemon-reload && sudo systemctl restart arke-apns-relay && sudo nginx -t && sudo systemctl reload nginx"
+  ssh "$ssh_target" "sudo systemctl daemon-reload && sudo systemctl restart arke-apns-relay && { ! command -v nginx >/dev/null 2>&1 || sudo nginx -t; } && { ! command -v nginx >/dev/null 2>&1 || sudo systemctl reload nginx; }"
 
   echo "Rollback complete."
 }

@@ -44,9 +44,10 @@ main() {
 	local ssh_target
 	ssh_target="$SSH_USER@$SSH_HOST"
 
-	ssh "$ssh_target" \
-		"REMOTE_BASE='$REMOTE_BASE' bash -s" <<'REMOTE_SCRIPT'
+	ssh "$ssh_target" bash -s -- "$REMOTE_BASE" <<'REMOTE_SCRIPT'
 set -euo pipefail
+
+REMOTE_BASE="$1"
 
 if ! command -v sudo >/dev/null 2>&1; then
 	echo "sudo is required on the remote server" >&2
