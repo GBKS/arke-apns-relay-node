@@ -9,6 +9,7 @@ const { loadConfig } = require('./config');
 const { CheckpointStore } = require('./checkpoint-store');
 const { ApnsSender, StaleDeviceTokenError } = require('./apns-sender');
 const { createClientFactory, readMailbox, subscribeMailbox } = require('./mailbox-client');
+const { decodeVtxoSats } = require('./vtxo-decoder');
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 
@@ -135,26 +136,6 @@ async function validateMailboxAuthorization(client, mailboxIdHex, authHex, check
   };
 
   await readMailbox(client, request);
-}
-
-function decodeVtxoSats(vtxoBuffer) {
-  const bytes = vtxoBuffer instanceof Uint8Array ? vtxoBuffer : new Uint8Array(vtxoBuffer);
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  let total = 0;
-  for (let i = 0; i < bytes.length - 34; i++) {
-    if (bytes[i] === 0x51 && bytes[i + 1] === 0x20) {
-      const amountOffset = i - 9;
-      if (amountOffset >= 0) {
-        const amountLow = view.getUint32(amountOffset, true);
-        const amountHigh = view.getUint32(amountOffset + 4, true);
-        const sats = amountLow + amountHigh * 2 ** 32;
-        if (sats > 0 && sats < 21_000_000 * 1e8) {
-          total += sats;
-        }
-      }
-    }
-  }
-  return total;
 }
 
 async function refreshRegistrationMetric(store) {
