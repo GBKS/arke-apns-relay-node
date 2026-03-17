@@ -92,7 +92,7 @@ main() {
 
   prompt_required SSH_USER "SSH user: "
   prompt_required SSH_HOST "Server host or IP: "
-  prompt_default DOMAIN "Relay domain" "relay.arke.cash"
+  prompt_default DOMAIN "Relay domain" "relay.example.com"
   prompt_default REMOTE_BASE "Remote base directory" "/opt/arke-relay"
   prompt_default LOCAL_BACKUP_DIR "Backup directory to restore from" "$(find_latest_backup_dir)"
 

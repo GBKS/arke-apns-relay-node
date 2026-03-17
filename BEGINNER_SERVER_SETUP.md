@@ -6,7 +6,7 @@ It is intentionally copy/paste-friendly.
 
 This guide assumes you are adding the relay to **your existing Hetzner server** that already runs the Ark Bitcoin faucet (nginx is already installed and running).
 
-The relay will be reachable at `relay.arke.cash`.
+The relay will be reachable at `relay.example.com`.
 
 ---
 
@@ -15,7 +15,7 @@ The relay will be reachable at `relay.arke.cash`.
 You need:
 
 - SSH access to your Hetzner server
-- A DNS A record for `relay.arke.cash` pointing to your server's IP address (add this in your DNS provider before continuing)
+- A DNS A record for `relay.example.com` pointing to your server's IP address (add this in your DNS provider before continuing)
 - Your APNs `.p8` key file on your local machine (see next section)
   - The `mailbox_server.proto` **and its required `core.proto`** files from the [`bark`](https://gitlab.com/ark-bitcoin/bark) repository on your local machine (both are required)
 - These relay values ready:
@@ -269,13 +269,13 @@ journalctl -u arke-apns-relay -n 100 --no-pager
 
 ## 6) Put Relay Behind Nginx
 
-Since nginx is already running for your faucet, create a **new** site config for `relay.arke.cash`:
+Since nginx is already running for your faucet, create a **new** site config for `relay.example.com`:
 
 ```bash
-sudo tee /etc/nginx/sites-available/relay.arke.cash > /dev/null << 'EOF'
+sudo tee /etc/nginx/sites-available/relay.example.com > /dev/null << 'EOF'
 server {
     listen 80;
-    server_name relay.arke.cash;
+    server_name relay.example.com;
 
     location /v1/ {
         proxy_pass http://127.0.0.1:9898;
@@ -300,7 +300,7 @@ EOF
 Enable it:
 
 ```bash
-sudo ln -s /etc/nginx/sites-available/relay.arke.cash /etc/nginx/sites-enabled/
+sudo ln -s /etc/nginx/sites-available/relay.example.com /etc/nginx/sites-enabled/
 sudo nginx -t
 sudo systemctl reload nginx
 ```
@@ -313,10 +313,10 @@ Expected result:
 
 ## 7) TLS Certificate (HTTPS)
 
-Get a certificate for `relay.arke.cash` (certbot is already installed from your faucet setup; if not, install it first with `sudo apt install -y certbot python3-certbot-nginx`):
+Get a certificate for `relay.example.com` (certbot is already installed from your faucet setup; if not, install it first with `sudo apt install -y certbot python3-certbot-nginx`):
 
 ```bash
-sudo certbot --nginx -d relay.arke.cash
+sudo certbot --nginx -d relay.example.com
 ```
 
 Expected result: certbot finishes successfully, edits the nginx config, and HTTPS works. Certbot's auto-renewal cron/timer is already active from your faucet setup.
@@ -352,7 +352,7 @@ Expected result:
 ## 9) Verify It Works (3 quick checks)
 
 ```bash
-export RELAY_DOMAIN=relay.arke.cash
+export RELAY_DOMAIN=relay.example.com
 export MAILBOX_ID=<UNBLINDED_ID_HEX>
 export RELAY_API_TOKEN=<YOUR_RELAY_API_TOKEN>
 ```
@@ -434,7 +434,7 @@ journalctl -u arke-apns-relay --since "24 hours ago" | grep -i "error\|warn\|fai
 **Health endpoint** (tests the full nginx → relay path; run this from your laptop too):
 
 ```bash
-curl -si https://relay.arke.cash/healthz
+curl -si https://relay.example.com/healthz
 ```
 
 Expected: `200` and body `ok`.
@@ -443,7 +443,7 @@ Expected: `200` and body `ok`.
 
 ```bash
 curl -si -H "x-relay-token: <YOUR_RELAY_API_TOKEN>" \
-  "https://relay.arke.cash/v1/registrations?mailbox_id=<MAILBOX_ID>"
+  "https://relay.example.com/v1/registrations?mailbox_id=<MAILBOX_ID>"
 ```
 
 Expected: `200` with a JSON response.
@@ -459,7 +459,7 @@ ls -lh /opt/arke-relay/data/relay.db
 Set up a free external monitor at [UptimeRobot](https://uptimerobot.com) or [Betterstack Uptime](https://betterstack.com/uptime). Both have free tiers. Point the monitor at:
 
 ```
-https://relay.arke.cash/healthz
+https://relay.example.com/healthz
 ```
 
 Configure it to ping every 5 minutes and alert you by email if it goes down. This way you get notified without having to check manually.
