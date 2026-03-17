@@ -2,11 +2,13 @@ const fs = require('fs');
 const apn = require('apn');
 
 class StaleDeviceTokenError extends Error {
-  constructor(deviceToken, reason) {
-    super(`APNs device token stale: ${reason} (token suffix ${deviceToken.slice(-8)})`);
+  constructor(deviceToken, reason, environment = '') {
+    const envSuffix = environment ? ` [${environment}]` : '';
+    super(`APNs device token stale${envSuffix}: ${reason} (token suffix ${deviceToken.slice(-8)})`);
     this.name = 'StaleDeviceTokenError';
     this.deviceToken = deviceToken;
     this.apnsReason = reason;
+    this.apnsEnvironment = environment;
   }
 }
 
@@ -14,7 +16,8 @@ class ApnsSender {
   constructor(config, logger) {
     this.logger = logger;
     this.config = config;
-    this.provider = new apn.Provider({
+    this.primaryEnvironment = config.production ? 'production' : 'sandbox';
+    this.primaryProvider = new apn.Provider({
       token: {
         key: fs.readFileSync(config.keyFile),
         keyId: config.keyId,
@@ -22,6 +25,20 @@ class ApnsSender {
       },
       production: config.production
     });
+
+    this.fallbackEnvironment = null;
+    this.fallbackProvider = null;
+    if (config.allowBothEnvironments) {
+      this.fallbackEnvironment = config.production ? 'sandbox' : 'production';
+      this.fallbackProvider = new apn.Provider({
+        token: {
+          key: fs.readFileSync(config.keyFile),
+          keyId: config.keyId,
+          teamId: config.teamId
+        },
+        production: !config.production
+      });
+    }
   }
 
   async sendMailboxNotification({ checkpoint, vtxoCount, mailboxId, deviceToken, topic }) {
@@ -40,21 +57,56 @@ class ApnsSender {
       body: `Checkpoint ${checkpoint} (${vtxoCount} VTXO${vtxoCount === 1 ? '' : 's'})`
     };
 
-    const result = await this.provider.send(note, deviceToken);
-    if (result.failed.length > 0) {
-      const failure = result.failed[0];
-      const reason = failure.response?.reason;
-      if (reason === 'BadDeviceToken' || reason === 'Unregistered') {
-        throw new StaleDeviceTokenError(deviceToken, reason);
-      }
-      throw new Error(`APNs send failed: ${JSON.stringify(failure)}`);
+    try {
+      await this._sendViaProvider(this.primaryProvider, this.primaryEnvironment, note, deviceToken);
+    } catch (err) {
+      const canTryFallback =
+        this.fallbackProvider
+        && err instanceof StaleDeviceTokenError
+        && (err.apnsReason === 'BadDeviceToken' || err.apnsReason === 'Unregistered');
+
+      if (!canTryFallback) throw err;
+
+      this.logger.warn(
+        {
+          deviceTokenSuffix: deviceToken.slice(-8),
+          fromEnvironment: this.primaryEnvironment,
+          toEnvironment: this.fallbackEnvironment,
+          reason: err.apnsReason
+        },
+        'retrying APNs send in fallback environment after stale-token response'
+      );
+
+      await this._sendViaProvider(this.fallbackProvider, this.fallbackEnvironment, note, deviceToken);
+      this.logger.info(
+        {
+          deviceTokenSuffix: deviceToken.slice(-8),
+          environment: this.fallbackEnvironment
+        },
+        'apns notification delivered via fallback environment'
+      );
     }
 
     this.logger.info({ checkpoint, vtxoCount, topic }, 'apns notification delivered');
   }
 
+  async _sendViaProvider(provider, environment, note, deviceToken) {
+    const result = await provider.send(note, deviceToken);
+    if ((result.failed || []).length > 0) {
+      const failure = result.failed[0];
+      const reason = failure.response?.reason;
+      if (reason === 'BadDeviceToken' || reason === 'Unregistered') {
+        throw new StaleDeviceTokenError(deviceToken, reason, environment);
+      }
+      throw new Error(`APNs send failed: ${JSON.stringify(failure)}`);
+    }
+  }
+
   shutdown() {
-    this.provider.shutdown();
+    this.primaryProvider.shutdown();
+    if (this.fallbackProvider) {
+      this.fallbackProvider.shutdown();
+    }
   }
 }
 

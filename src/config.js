@@ -35,6 +35,7 @@ function loadConfig() {
       teamId: must('APNS_TEAM_ID'),
       topic: must('APNS_TOPIC'),
       production: parseBool(process.env.APNS_PRODUCTION, true),
+      allowBothEnvironments: parseBool(process.env.APNS_ALLOW_BOTH_ENVIRONMENTS, false),
       pushType: process.env.APNS_PUSH_TYPE || 'alert'
     }
   };

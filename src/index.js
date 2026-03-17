@@ -288,8 +288,14 @@ class MailboxWorker {
     const call = subscribeMailbox(client, this._makeRequest(checkpoint));
     this._currentCall = call;
 
-
     await new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+
       call.on('data', async (message) => {
         call.pause();
         try {
@@ -302,13 +308,26 @@ class MailboxWorker {
       });
 
       call.on('error', (err) => {
+        const cancelledByClient = err?.code === 1 || /cancelled on client/i.test(String(err?.message || ''));
+        if (this._stopped && cancelledByClient) {
+          this._log.info('subscription stream cancelled during worker stop');
+          finish();
+          return;
+        }
+
         this._log.warn({ err }, 'subscription stream error, reconnecting');
-        resolve();
+        finish();
       });
 
       call.on('end', () => {
+        if (this._stopped) {
+          this._log.info('subscription stream ended during worker stop');
+          finish();
+          return;
+        }
+
         this._log.warn('subscription stream ended, reconnecting');
-        resolve();
+        finish();
       });
     });
 
