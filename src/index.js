@@ -143,12 +143,15 @@ async function refreshRegistrationMetric(store) {
 }
 
 async function processMailboxMessage(message, mailboxId, sender, store, config) {
-  if (!message || !message.message || !message.message.arkoor) {
+  // Depending on proto/runtime version, oneof payload may appear either as
+  // `message.arkoor` or at top-level as `arkoor`.
+  const arkoorMessage = message?.message?.arkoor || message?.arkoor;
+  if (!message || !arkoorMessage) {
     return;
   }
 
   const checkpoint = Number(message.checkpoint || 0);
-  const vtxoCount = message.message.arkoor.vtxos?.length || 0;
+  const vtxoCount = arkoorMessage.vtxos?.length || 0;
 
   metricMessages.inc();
 
