@@ -51,6 +51,7 @@ cp .env.example .env
 - `APNS_TOPIC` — iOS app bundle id used as APNs topic (example: `com.example.app`).
 - `APNS_PRODUCTION` — `1` for production APNs, `0` for sandbox APNs.
 - `APNS_ALLOW_BOTH_ENVIRONMENTS` — if `1`, relay retries once against the opposite APNs environment after `BadDeviceToken`/`Unregistered`.
+- `APNS_FALLBACK_KEY_FILE`, `APNS_FALLBACK_KEY_ID`, `APNS_FALLBACK_TEAM_ID` — optional dedicated credentials for the fallback environment when dual-mode is enabled. Set all three together.
 
 ### Runtime values
 

@@ -19,6 +19,17 @@ function must(name) {
 }
 
 function loadConfig() {
+  const fallbackKeyFile = process.env.APNS_FALLBACK_KEY_FILE || '';
+  const fallbackKeyId = process.env.APNS_FALLBACK_KEY_ID || '';
+  const fallbackTeamId = process.env.APNS_FALLBACK_TEAM_ID || '';
+  const fallbackCredsConfigured = Boolean(fallbackKeyFile || fallbackKeyId || fallbackTeamId);
+
+  if (fallbackCredsConfigured && !(fallbackKeyFile && fallbackKeyId && fallbackTeamId)) {
+    throw new Error(
+      'APNS_FALLBACK_KEY_FILE, APNS_FALLBACK_KEY_ID, and APNS_FALLBACK_TEAM_ID must all be set together'
+    );
+  }
+
   return {
     protoPath: path.resolve(process.cwd(), process.env.PROTO_PATH || './protos/mailbox_server.proto'),
     checkpointDb: path.resolve(process.cwd(), process.env.CHECKPOINT_DB || './relay.db'),
@@ -36,6 +47,13 @@ function loadConfig() {
       topic: must('APNS_TOPIC'),
       production: parseBool(process.env.APNS_PRODUCTION, true),
       allowBothEnvironments: parseBool(process.env.APNS_ALLOW_BOTH_ENVIRONMENTS, false),
+      fallbackCredentials: fallbackCredsConfigured
+        ? {
+            keyFile: fallbackKeyFile,
+            keyId: fallbackKeyId,
+            teamId: fallbackTeamId
+          }
+        : null,
       pushType: process.env.APNS_PUSH_TYPE || 'alert'
     }
   };

@@ -16,13 +16,14 @@ class ApnsSender {
   constructor(config, logger) {
     this.logger = logger;
     this.config = config;
+    const primaryToken = {
+      key: fs.readFileSync(config.keyFile),
+      keyId: config.keyId,
+      teamId: config.teamId
+    };
     this.primaryEnvironment = config.production ? 'production' : 'sandbox';
     this.primaryProvider = new apn.Provider({
-      token: {
-        key: fs.readFileSync(config.keyFile),
-        keyId: config.keyId,
-        teamId: config.teamId
-      },
+      token: primaryToken,
       production: config.production
     });
 
@@ -30,12 +31,18 @@ class ApnsSender {
     this.fallbackProvider = null;
     if (config.allowBothEnvironments) {
       this.fallbackEnvironment = config.production ? 'sandbox' : 'production';
+      const fallbackCreds = config.fallbackCredentials || {
+        keyFile: config.keyFile,
+        keyId: config.keyId,
+        teamId: config.teamId
+      };
+      const fallbackToken = {
+        key: fs.readFileSync(fallbackCreds.keyFile),
+        keyId: fallbackCreds.keyId,
+        teamId: fallbackCreds.teamId
+      };
       this.fallbackProvider = new apn.Provider({
-        token: {
-          key: fs.readFileSync(config.keyFile),
-          keyId: config.keyId,
-          teamId: config.teamId
-        },
+        token: fallbackToken,
         production: !config.production
       });
     }
