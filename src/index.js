@@ -137,6 +137,26 @@ async function validateMailboxAuthorization(client, mailboxIdHex, authHex, check
   await readMailbox(client, request);
 }
 
+function decodeVtxoSats(vtxoBuffer) {
+  const bytes = vtxoBuffer instanceof Uint8Array ? vtxoBuffer : new Uint8Array(vtxoBuffer);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let total = 0;
+  for (let i = 0; i < bytes.length - 34; i++) {
+    if (bytes[i] === 0x51 && bytes[i + 1] === 0x20) {
+      const amountOffset = i - 9;
+      if (amountOffset >= 0) {
+        const amountLow = view.getUint32(amountOffset, true);
+        const amountHigh = view.getUint32(amountOffset + 4, true);
+        const sats = amountLow + amountHigh * 2 ** 32;
+        if (sats > 0 && sats < 21_000_000 * 1e8) {
+          total += sats;
+        }
+      }
+    }
+  }
+  return total;
+}
+
 async function refreshRegistrationMetric(store) {
   const total = await store.countAllDevices();
   metricRegistrations.set(total);
@@ -151,7 +171,12 @@ async function processMailboxMessage(message, mailboxId, sender, store, config) 
   }
 
   const checkpoint = Number(message.checkpoint || 0);
-  const vtxoCount = arkoorMessage.vtxos?.length || 0;
+  const vtxos = arkoorMessage.vtxos || [];
+  const vtxoCount = vtxos.length;
+  let totalSats = 0;
+  for (const vtxo of vtxos) {
+    try { totalSats += decodeVtxoSats(vtxo); } catch (_) {}
+  }
 
   metricMessages.inc();
 
@@ -169,6 +194,7 @@ async function processMailboxMessage(message, mailboxId, sender, store, config) 
         await sender.sendMailboxNotification({
           checkpoint,
           vtxoCount,
+          totalSats,
           mailboxId,
           deviceToken: recipient.device_token,
           topic: recipient.apns_topic

@@ -48,7 +48,7 @@ class ApnsSender {
     }
   }
 
-  async sendMailboxNotification({ checkpoint, vtxoCount, mailboxId, deviceToken, topic }) {
+  async sendMailboxNotification({ checkpoint, vtxoCount, totalSats, mailboxId, deviceToken, topic }) {
     const note = new apn.Notification();
     note.topic = topic || this.config.topic;
     note.pushType = this.config.pushType;
@@ -59,10 +59,11 @@ class ApnsSender {
       vtxo_count: vtxoCount,
       mailbox_id: mailboxId
     };
-    note.alert = {
-      title: 'New Ark mailbox event',
-      body: `Checkpoint ${checkpoint} (${vtxoCount} VTXO${vtxoCount === 1 ? '' : 's'})`
-    };
+    const title = totalSats > 0
+      ? `Received \u20BF${totalSats.toLocaleString('en-US')}`
+      : 'Received bitcoin';
+    const body = vtxoCount === 1 ? 'View payment.' : `View ${vtxoCount} payments.`;
+    note.alert = { title, body };
 
     try {
       await this._sendViaProvider(this.primaryProvider, this.primaryEnvironment, note, deviceToken);
