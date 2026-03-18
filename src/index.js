@@ -6,7 +6,7 @@ const pino = require('pino');
 const clientMetrics = require('prom-client');
 
 const { loadConfig } = require('./config');
-const { CheckpointStore } = require('./checkpoint-store');
+const { CheckpointStore, STAT_KEYS } = require('./checkpoint-store');
 const { ApnsSender, StaleDeviceTokenError } = require('./apns-sender');
 const { createClientFactory, readMailbox, subscribeMailbox } = require('./mailbox-client');
 const { decodeVtxoSats } = require('./vtxo-decoder');
@@ -37,6 +37,33 @@ const metricWorkers = new clientMetrics.Gauge({
   name: 'relay_active_workers',
   help: 'Number of active mailbox subscription workers'
 });
+
+const lifetimeMetrics = {
+  [STAT_KEYS.lifetimeVtxosProcessed]: new clientMetrics.Gauge({
+    name: STAT_KEYS.lifetimeVtxosProcessed,
+    help: 'Lifetime VTXOs processed, persisted in SQLite'
+  }),
+  [STAT_KEYS.lifetimeSatsProcessed]: new clientMetrics.Gauge({
+    name: STAT_KEYS.lifetimeSatsProcessed,
+    help: 'Lifetime sats processed, persisted in SQLite'
+  }),
+  [STAT_KEYS.lifetimeMailboxMessagesReceived]: new clientMetrics.Gauge({
+    name: STAT_KEYS.lifetimeMailboxMessagesReceived,
+    help: 'Lifetime mailbox messages received, persisted in SQLite'
+  }),
+  [STAT_KEYS.lifetimeRegistrations]: new clientMetrics.Gauge({
+    name: STAT_KEYS.lifetimeRegistrations,
+    help: 'Lifetime device registrations created, persisted in SQLite'
+  }),
+  [STAT_KEYS.lifetimeUnregistrations]: new clientMetrics.Gauge({
+    name: STAT_KEYS.lifetimeUnregistrations,
+    help: 'Lifetime explicit device unregistrations, persisted in SQLite'
+  }),
+  [STAT_KEYS.lifetimeStaleDeviceRemovals]: new clientMetrics.Gauge({
+    name: STAT_KEYS.lifetimeStaleDeviceRemovals,
+    help: 'Lifetime stale device removals, persisted in SQLite'
+  })
+};
 
 function isHex(str) {
   return typeof str === 'string' && str.length > 0 && str.length % 2 === 0 && /^[0-9a-fA-F]+$/.test(str);
@@ -143,6 +170,13 @@ async function refreshRegistrationMetric(store) {
   metricRegistrations.set(total);
 }
 
+async function refreshLifetimeMetrics(store) {
+  const stats = await store.getStats();
+  for (const [statKey, metric] of Object.entries(lifetimeMetrics)) {
+    metric.set(Number(stats[statKey] || 0));
+  }
+}
+
 async function processMailboxMessage(message, mailboxId, sender, store, config) {
   // Depending on proto/runtime version, oneof payload may appear either as
   // `message.arkoor` or at top-level as `arkoor`.
@@ -188,7 +222,14 @@ async function processMailboxMessage(message, mailboxId, sender, store, config) 
             { deviceTokenSuffix: recipient.device_token.slice(-8), reason: err.apnsReason },
             'removing stale APNs device token'
           );
-          await store.unregisterDevice(mailboxId, recipient.device_token);
+          const removed = await store.unregisterDevice(
+            mailboxId,
+            recipient.device_token,
+            STAT_KEYS.lifetimeStaleDeviceRemovals
+          );
+          if (removed > 0) {
+            lifetimeMetrics[STAT_KEYS.lifetimeStaleDeviceRemovals].inc(removed);
+          }
           await refreshRegistrationMetric(store);
         } else {
           metricApnsFailure.inc();
@@ -203,7 +244,14 @@ async function processMailboxMessage(message, mailboxId, sender, store, config) 
 
   // Always advance checkpoint after processing, even if no sends succeeded,
   // to avoid repeated delivery attempts for the same message.
-  await store.set(mailboxId, checkpoint);
+  await store.recordMailboxMessage(mailboxId, checkpoint, { vtxoCount, totalSats });
+  lifetimeMetrics[STAT_KEYS.lifetimeMailboxMessagesReceived].inc();
+  if (vtxoCount > 0) {
+    lifetimeMetrics[STAT_KEYS.lifetimeVtxosProcessed].inc(vtxoCount);
+  }
+  if (totalSats > 0) {
+    lifetimeMetrics[STAT_KEYS.lifetimeSatsProcessed].inc(totalSats);
+  }
 }
 
 // ─── per-mailbox subscription worker ────────────────────────────────────────
@@ -469,8 +517,11 @@ function startHttpServer({ port, config, store, workerManager, clientFactory }) 
       await validateMailboxAuthorization(client, mailboxId, authorizationHex, checkpoint);
 
       await store.setMailbox(mailboxId, arkAddr, authorizationHex);
-      await store.registerDevice(mailboxId, deviceToken, apnsTopic);
+      const registrationResult = await store.registerDevice(mailboxId, deviceToken, apnsTopic);
       workerManager.ensureWorker(mailboxId, arkAddr, authorizationHex);
+      if (registrationResult.inserted) {
+        lifetimeMetrics[STAT_KEYS.lifetimeRegistrations].inc();
+      }
 
       const totalDevices = await store.countDevices(mailboxId);
       await refreshRegistrationMetric(store);
@@ -502,10 +553,17 @@ function startHttpServer({ port, config, store, workerManager, clientFactory }) 
         return res.status(400).json({ error: 'device_token must be a 64-char hex APNs token' });
       }
 
-      const removed = await store.unregisterDevice(mailboxId, deviceToken);
+      const removed = await store.unregisterDevice(
+        mailboxId,
+        deviceToken,
+        STAT_KEYS.lifetimeUnregistrations
+      );
       const remaining = await store.countDevices(mailboxId);
       if (remaining === 0) {
         workerManager.stopWorker(mailboxId);
+      }
+      if (removed > 0) {
+        lifetimeMetrics[STAT_KEYS.lifetimeUnregistrations].inc(removed);
       }
       await refreshRegistrationMetric(store);
       return res.status(200).json({
@@ -562,6 +620,7 @@ async function run() {
   const workerManager = new WorkerManager({ store, sender, clientFactory, config });
 
   await refreshRegistrationMetric(store);
+  await refreshLifetimeMetrics(store);
   await workerManager.startAll();
 
   startHttpServer({ port: config.metricsPort, config, store, workerManager, clientFactory });

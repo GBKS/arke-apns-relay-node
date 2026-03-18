@@ -7,6 +7,7 @@ First-draft mailbox → APNs relay prototype. For the Ark implementation by [Sec
 - Reads and subscribes to Ark mailbox RPCs (`ReadMailbox`, `SubscribeMailbox`)
 - Sends APNs notifications for mailbox `Arkoor` messages
 - Stores a per-mailbox checkpoint in SQLite
+- Stores persistent global lifetime activity counters in SQLite and exposes them on `/metrics`
 - Supports registration fanout (`mailbox_id -> many APNs device tokens`)
 - Validates registration mailbox authorization by calling Ark `ReadMailbox`
 - Multi-mailbox, multi-server: each wallet registers with its own Ark server address; one subscription worker per mailbox
@@ -93,8 +94,21 @@ It runs from your local machine, prompts for required values, uploads your `.p8`
 ## Notes
 
 - Method names can vary by dynamic gRPC loader casing; this draft tries multiple candidates.
-- Checkpoint is persisted only after successful APNs send (or always in `DRY_RUN=1`).
+- Checkpoint is persisted after message processing, even if APNs delivery fails, to avoid repeated delivery attempts for the same message.
 - Backfill loop continues while `have_more=true`, then switches to streaming mode.
+
+## Persistent lifetime metrics
+
+The relay now persists these lifetime counters in the same SQLite database configured by `CHECKPOINT_DB`, reloads them on startup, and exports them through `GET /metrics`:
+
+- `lifetime_vtxos_processed`
+- `lifetime_sats_processed`
+- `lifetime_mailbox_messages_received`
+- `lifetime_registrations`
+- `lifetime_unregistrations`
+- `lifetime_stale_device_removals`
+
+These survive relay restarts because they are backed by SQLite rather than process memory.
 
 ## iOS registration API
 
