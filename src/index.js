@@ -177,81 +177,255 @@ async function refreshLifetimeMetrics(store) {
   }
 }
 
-async function processMailboxMessage(message, mailboxId, sender, store, config) {
-  // Depending on proto/runtime version, oneof payload may appear either as
-  // `message.arkoor` or at top-level as `arkoor`.
-  const arkoorMessage = message?.message?.arkoor || message?.arkoor;
-  if (!message || !arkoorMessage) {
-    return;
+function firstDefined(...values) {
+  return values.find((value) => value !== undefined && value !== null);
+}
+
+function resolveMailboxMessage(message) {
+  if (!message || typeof message !== 'object') {
+    return null;
   }
 
-  const checkpoint = Number(message.checkpoint || 0);
-  const vtxos = arkoorMessage.vtxos || [];
+  const envelope = message.message && typeof message.message === 'object'
+    ? message.message
+    : null;
+
+  const candidates = [
+    ['arkoor', firstDefined(envelope?.arkoor, message.arkoor)],
+    [
+      'roundParticipationCompleted',
+      firstDefined(
+        envelope?.roundParticipationCompleted,
+        envelope?.round_participation_completed,
+        message.roundParticipationCompleted,
+        message.round_participation_completed
+      )
+    ],
+    [
+      'incomingLightningPayment',
+      firstDefined(
+        envelope?.incomingLightningPayment,
+        envelope?.incoming_lightning_payment,
+        message.incomingLightningPayment,
+        message.incoming_lightning_payment
+      )
+    ],
+    [
+      'recoveryVtxoIds',
+      firstDefined(
+        envelope?.recoveryVtxoIds,
+        envelope?.recovery_vtxo_ids,
+        message.recoveryVtxoIds,
+        message.recovery_vtxo_ids
+      )
+    ]
+  ];
+
+  const resolved = candidates.find(([, payload]) => payload);
+  if (!resolved) {
+    return null;
+  }
+
+  return { type: resolved[0], payload: resolved[1] };
+}
+
+function getMailboxMessageKeys(message) {
+  const envelope = message?.message && typeof message.message === 'object'
+    ? Object.keys(message.message)
+    : [];
+  const topLevel = message && typeof message === 'object'
+    ? Object.keys(message)
+    : [];
+
+  return [...new Set([...envelope, ...topLevel])].filter(
+    (key) => key !== 'message' && key !== 'checkpoint' && key !== 'mailbox_type' && key !== 'mailboxType'
+  );
+}
+
+function summarizeArkoorMessage(arkoorMessage) {
+  const vtxos = arkoorMessage?.vtxos || [];
   const vtxoCount = vtxos.length;
   let totalSats = 0;
   for (const vtxo of vtxos) {
     try { totalSats += decodeVtxoSats(vtxo); } catch (_) {}
   }
 
-  metricMessages.inc();
+  return {
+    stats: { vtxoCount, totalSats },
+    notification: { messageType: 'arkoor', vtxoCount, totalSats }
+  };
+}
 
+function summarizeRoundParticipationCompletedMessage(roundParticipationCompletedMessage) {
+  const paymentHashes =
+    roundParticipationCompletedMessage?.paymentHashes
+    || roundParticipationCompletedMessage?.payment_hashes
+    || [];
+
+  return {
+    stats: { vtxoCount: 0, totalSats: 0 },
+    notification: {
+      messageType: 'roundParticipationCompleted',
+      paymentHashCount: paymentHashes.length
+    }
+  };
+}
+
+function summarizeIncomingLightningPaymentMessage(incomingLightningPaymentMessage) {
+  const paymentHash =
+    incomingLightningPaymentMessage?.paymentHash
+    || incomingLightningPaymentMessage?.payment_hash
+    || null;
+
+  return {
+    stats: { vtxoCount: 0, totalSats: 0 },
+    notification: {
+      messageType: 'incomingLightningPayment',
+      hasPaymentHash: Boolean(paymentHash)
+    }
+  };
+}
+
+function summarizeRecoveryVtxoIdsMessage(recoveryVtxoIdsMessage) {
+  const vtxoIds =
+    recoveryVtxoIdsMessage?.vtxoIds
+    || recoveryVtxoIdsMessage?.vtxo_ids
+    || [];
+
+  return {
+    stats: { vtxoCount: 0, totalSats: 0 },
+    notification: {
+      messageType: 'recoveryVtxoIds',
+      recoveryVtxoCount: vtxoIds.length
+    }
+  };
+}
+
+const mailboxMessageHandlers = {
+  arkoor: summarizeArkoorMessage,
+  roundParticipationCompleted: summarizeRoundParticipationCompletedMessage,
+  incomingLightningPayment: summarizeIncomingLightningPaymentMessage,
+  recoveryVtxoIds: summarizeRecoveryVtxoIdsMessage
+};
+
+async function sendMailboxNotificationToRecipients({
+  mailboxId,
+  checkpoint,
+  messageType,
+  notification,
+  sender,
+  store,
+  config
+}) {
   const recipients = await store.getDevices(mailboxId);
   let successfulSends = 0;
 
   if (recipients.length === 0) {
-    logger.warn({ mailboxId, checkpoint }, 'no registered devices, skipping APNs send');
-  } else if (config.dryRun) {
-    logger.info({ checkpoint, vtxoCount, recipientCount: recipients.length }, 'dry-run enabled, skipping APNs send');
-    successfulSends = recipients.length; // treat as success for checkpoint
-  } else {
-    for (const recipient of recipients) {
-      try {
-        await sender.sendMailboxNotification({
-          checkpoint,
-          vtxoCount,
-          totalSats,
+    logger.warn({ mailboxId, checkpoint, messageType }, 'no registered devices, skipping APNs send');
+    return successfulSends;
+  }
+
+  if (config.dryRun) {
+    logger.info(
+      { checkpoint, mailboxId, messageType, recipientCount: recipients.length },
+      'dry-run enabled, skipping APNs send'
+    );
+    return recipients.length;
+  }
+
+  for (const recipient of recipients) {
+    try {
+      await sender.sendMailboxNotification({
+        checkpoint,
+        mailboxId,
+        deviceToken: recipient.device_token,
+        topic: recipient.apns_topic,
+        ...notification
+      });
+      successfulSends += 1;
+      metricApnsSuccess.inc();
+    } catch (err) {
+      if (err instanceof StaleDeviceTokenError) {
+        logger.warn(
+          {
+            deviceTokenSuffix: recipient.device_token.slice(-8),
+            messageType,
+            reason: err.apnsReason
+          },
+          'removing stale APNs device token'
+        );
+        const removed = await store.unregisterDevice(
           mailboxId,
-          deviceToken: recipient.device_token,
-          topic: recipient.apns_topic
-        });
-        successfulSends += 1;
-        metricApnsSuccess.inc();
-      } catch (err) {
-        if (err instanceof StaleDeviceTokenError) {
-          logger.warn(
-            { deviceTokenSuffix: recipient.device_token.slice(-8), reason: err.apnsReason },
-            'removing stale APNs device token'
-          );
-          const removed = await store.unregisterDevice(
-            mailboxId,
-            recipient.device_token,
-            STAT_KEYS.lifetimeStaleDeviceRemovals
-          );
-          if (removed > 0) {
-            lifetimeMetrics[STAT_KEYS.lifetimeStaleDeviceRemovals].inc(removed);
-          }
-          await refreshRegistrationMetric(store);
-        } else {
-          metricApnsFailure.inc();
-          logger.error(
-            { err, checkpoint, deviceTokenSuffix: recipient.device_token.slice(-8) },
-            'failed to send APNs notification to device'
-          );
+          recipient.device_token,
+          STAT_KEYS.lifetimeStaleDeviceRemovals
+        );
+        if (removed > 0) {
+          lifetimeMetrics[STAT_KEYS.lifetimeStaleDeviceRemovals].inc(removed);
         }
+        await refreshRegistrationMetric(store);
+      } else {
+        metricApnsFailure.inc();
+        logger.error(
+          {
+            err,
+            checkpoint,
+            deviceTokenSuffix: recipient.device_token.slice(-8),
+            messageType
+          },
+          'failed to send APNs notification to device'
+        );
       }
     }
   }
 
+  return successfulSends;
+}
+
+async function recordProcessedMailboxMessage(store, mailboxId, checkpoint, stats) {
+  await store.recordMailboxMessage(mailboxId, checkpoint, stats);
+  lifetimeMetrics[STAT_KEYS.lifetimeMailboxMessagesReceived].inc();
+  if (stats.vtxoCount > 0) {
+    lifetimeMetrics[STAT_KEYS.lifetimeVtxosProcessed].inc(stats.vtxoCount);
+  }
+  if (stats.totalSats > 0) {
+    lifetimeMetrics[STAT_KEYS.lifetimeSatsProcessed].inc(stats.totalSats);
+  }
+}
+
+async function processMailboxMessage(message, mailboxId, sender, store, config) {
+  if (!message) {
+    return;
+  }
+
+  const checkpoint = Number(message.checkpoint || 0);
+  metricMessages.inc();
+
+  const resolvedMessage = resolveMailboxMessage(message);
+  if (!resolvedMessage) {
+    logger.warn(
+      { checkpoint, mailboxId, messageKeys: getMailboxMessageKeys(message) },
+      'unsupported mailbox message type, advancing checkpoint without APNs send'
+    );
+    await recordProcessedMailboxMessage(store, mailboxId, checkpoint, { vtxoCount: 0, totalSats: 0 });
+    return;
+  }
+
+  const handler = mailboxMessageHandlers[resolvedMessage.type];
+  const { stats, notification } = handler(resolvedMessage.payload);
+
+  await sendMailboxNotificationToRecipients({
+    mailboxId,
+    checkpoint,
+    messageType: resolvedMessage.type,
+    notification,
+    sender,
+    store,
+    config
+  });
+
   // Always advance checkpoint after processing, even if no sends succeeded,
   // to avoid repeated delivery attempts for the same message.
-  await store.recordMailboxMessage(mailboxId, checkpoint, { vtxoCount, totalSats });
-  lifetimeMetrics[STAT_KEYS.lifetimeMailboxMessagesReceived].inc();
-  if (vtxoCount > 0) {
-    lifetimeMetrics[STAT_KEYS.lifetimeVtxosProcessed].inc(vtxoCount);
-  }
-  if (totalSats > 0) {
-    lifetimeMetrics[STAT_KEYS.lifetimeSatsProcessed].inc(totalSats);
-  }
+  await recordProcessedMailboxMessage(store, mailboxId, checkpoint, stats);
 }
 
 // ─── per-mailbox subscription worker ────────────────────────────────────────

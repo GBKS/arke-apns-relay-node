@@ -48,22 +48,29 @@ class ApnsSender {
     }
   }
 
-  async sendMailboxNotification({ checkpoint, vtxoCount, totalSats, mailboxId, deviceToken, topic }) {
-    const note = new apn.Notification();
-    note.topic = topic || this.config.topic;
-    note.pushType = this.config.pushType;
-    note.sound = 'default';
-    note.payload = {
-      type: 'mailbox_arkoor',
+  async sendMailboxNotification({
+    messageType,
+    checkpoint,
+    vtxoCount,
+    totalSats,
+    paymentHashCount,
+    hasPaymentHash,
+    recoveryVtxoCount,
+    mailboxId,
+    deviceToken,
+    topic
+  }) {
+    const note = this._buildMailboxNotification({
+      messageType,
       checkpoint,
-      vtxo_count: vtxoCount,
-      mailbox_id: mailboxId
-    };
-    const title = totalSats > 0
-      ? `Received \u20BF${totalSats.toLocaleString('en-US')}`
-      : 'Received bitcoin';
-    const body = vtxoCount === 1 ? 'View payment.' : `View ${vtxoCount} payments.`;
-    note.alert = { title, body };
+      vtxoCount,
+      totalSats,
+      paymentHashCount,
+      hasPaymentHash,
+      recoveryVtxoCount,
+      mailboxId,
+      topic
+    });
 
     try {
       await this._sendViaProvider(this.primaryProvider, this.primaryEnvironment, note, deviceToken);
@@ -95,7 +102,93 @@ class ApnsSender {
       );
     }
 
-    this.logger.info({ checkpoint, vtxoCount, topic }, 'apns notification delivered');
+    this.logger.info({ checkpoint, messageType, topic }, 'apns notification delivered');
+  }
+
+  _buildMailboxNotification({
+    messageType,
+    checkpoint,
+    vtxoCount,
+    totalSats,
+    paymentHashCount,
+    hasPaymentHash,
+    recoveryVtxoCount,
+    mailboxId,
+    topic
+  }) {
+    const note = new apn.Notification();
+    note.topic = topic || this.config.topic;
+
+    switch (messageType) {
+      case 'arkoor': {
+        this._configureAlertNotification(note);
+        note.payload = {
+          type: 'mailbox_arkoor',
+          checkpoint,
+          vtxo_count: vtxoCount,
+          mailbox_id: mailboxId
+        };
+        const title = totalSats > 0
+          ? `Received \u20BF${totalSats.toLocaleString('en-US')}`
+          : 'Received bitcoin';
+        const body = vtxoCount === 1 ? 'View payment.' : `View ${vtxoCount} payments.`;
+        note.alert = { title, body };
+        return note;
+      }
+
+      case 'roundParticipationCompleted': {
+        this._configureBackgroundNotification(note);
+        note.payload = {
+          type: 'mailbox_round_participation_completed',
+          checkpoint,
+          payment_hash_count: paymentHashCount,
+          mailbox_id: mailboxId
+        };
+        return note;
+      }
+
+      case 'incomingLightningPayment': {
+        this._configureAlertNotification(note);
+        note.payload = {
+          type: 'mailbox_incoming_lightning_payment',
+          checkpoint,
+          has_payment_hash: hasPaymentHash,
+          mailbox_id: mailboxId
+        };
+        note.alert = {
+          title: 'Incoming payment',
+          body: 'Open Arké to accept it.'
+        };
+        return note;
+      }
+
+      case 'recoveryVtxoIds': {
+        this._configureBackgroundNotification(note);
+        note.payload = {
+          type: 'mailbox_recovery_vtxo_ids',
+          checkpoint,
+          recovery_vtxo_count: recoveryVtxoCount,
+          mailbox_id: mailboxId
+        };
+        return note;
+      }
+
+      default:
+        throw new Error(`unsupported mailbox notification type: ${messageType}`);
+    }
+  }
+
+  _configureAlertNotification(note) {
+    note.pushType = this.config.pushType;
+    note.sound = 'default';
+  }
+
+  _configureBackgroundNotification(note) {
+    note.pushType = 'background';
+    note.priority = 5;
+    note.contentAvailable = 1;
+    delete note.sound;
+    delete note.alert;
   }
 
   async _sendViaProvider(provider, environment, note, deviceToken) {

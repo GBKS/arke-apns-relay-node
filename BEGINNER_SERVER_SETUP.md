@@ -431,6 +431,12 @@ journalctl -u arke-apns-relay -f
 journalctl -u arke-apns-relay --since "24 hours ago" | grep -i "error\|warn\|fail"
 ```
 
+**See the latest 10 entries:**
+
+```bash
+sudo journalctl -u arke-apns-relay --no-pager -n 10
+```
+
 **Health endpoint** (tests the full nginx → relay path; run this from your laptop too):
 
 ```bash

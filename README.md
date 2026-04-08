@@ -5,7 +5,8 @@ First-draft mailbox → APNs relay prototype. For the Ark implementation by [Sec
 ## Done
 
 - Reads and subscribes to Ark mailbox RPCs (`ReadMailbox`, `SubscribeMailbox`)
-- Sends APNs notifications for mailbox `Arkoor` messages
+- Sends APNs notifications for mailbox `Arkoor`, `RoundParticipationCompleted`, `IncomingLightningPayment`, and `RecoveryVtxoIds` messages
+- Sends user-visible alerts for `Arkoor` and `IncomingLightningPayment`, and silent background pushes for `RoundParticipationCompleted` and `RecoveryVtxoIds`
 - Stores a per-mailbox checkpoint in SQLite
 - Stores persistent global lifetime activity counters in SQLite and exposes them on `/metrics`
 - Supports registration fanout (`mailbox_id -> many APNs device tokens`)
@@ -109,6 +110,8 @@ The relay now persists these lifetime counters in the same SQLite database confi
 - `lifetime_stale_device_removals`
 
 These survive relay restarts because they are backed by SQLite rather than process memory.
+
+./scripts/show-lifetime-stats.sh /opt/arke-relay/data/relay.db
 
 ## iOS registration API
 
