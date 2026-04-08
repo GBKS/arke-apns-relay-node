@@ -4,6 +4,10 @@ const STAT_KEYS = Object.freeze({
   lifetimeVtxosProcessed: 'lifetime_vtxos_processed',
   lifetimeSatsProcessed: 'lifetime_sats_processed',
   lifetimeMailboxMessagesReceived: 'lifetime_mailbox_messages_received',
+  lifetimeMailboxMessagesReceivedArkoor: 'lifetime_mailbox_messages_received_arkoor',
+  lifetimeMailboxMessagesReceivedRoundParticipationCompleted: 'lifetime_mailbox_messages_received_round_participation_completed',
+  lifetimeMailboxMessagesReceivedIncomingLightningPayment: 'lifetime_mailbox_messages_received_incoming_lightning_payment',
+  lifetimeMailboxMessagesReceivedRecoveryVtxoIds: 'lifetime_mailbox_messages_received_recovery_vtxo_ids',
   lifetimeRegistrations: 'lifetime_registrations',
   lifetimeUnregistrations: 'lifetime_unregistrations',
   lifetimeStaleDeviceRemovals: 'lifetime_stale_device_removals'
@@ -206,15 +210,27 @@ class CheckpointStore {
     });
   }
 
-  async recordMailboxMessage(mailboxId, checkpoint, { vtxoCount, totalSats }) {
+  async recordMailboxMessage(mailboxId, checkpoint, { vtxoCount, totalSats }, messageType = null) {
     await this.run('BEGIN IMMEDIATE');
     try {
       await this._setCheckpoint(mailboxId, checkpoint);
-      await this._incrementStats({
+      const statsUpdate = {
         [STAT_KEYS.lifetimeMailboxMessagesReceived]: 1,
         [STAT_KEYS.lifetimeVtxosProcessed]: vtxoCount,
         [STAT_KEYS.lifetimeSatsProcessed]: totalSats
-      });
+      };
+      if (messageType) {
+        const typeKey = {
+          arkoor: STAT_KEYS.lifetimeMailboxMessagesReceivedArkoor,
+          roundParticipationCompleted: STAT_KEYS.lifetimeMailboxMessagesReceivedRoundParticipationCompleted,
+          incomingLightningPayment: STAT_KEYS.lifetimeMailboxMessagesReceivedIncomingLightningPayment,
+          recoveryVtxoIds: STAT_KEYS.lifetimeMailboxMessagesReceivedRecoveryVtxoIds
+        }[messageType];
+        if (typeKey) {
+          statsUpdate[typeKey] = 1;
+        }
+      }
+      await this._incrementStats(statsUpdate);
       await this.run('COMMIT');
     } catch (err) {
       await this._rollback(err);

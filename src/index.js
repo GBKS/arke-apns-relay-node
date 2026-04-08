@@ -51,6 +51,22 @@ const lifetimeMetrics = {
     name: STAT_KEYS.lifetimeMailboxMessagesReceived,
     help: 'Lifetime mailbox messages received, persisted in SQLite'
   }),
+  [STAT_KEYS.lifetimeMailboxMessagesReceivedArkoor]: new clientMetrics.Gauge({
+    name: STAT_KEYS.lifetimeMailboxMessagesReceivedArkoor,
+    help: 'Lifetime arkoor messages received, persisted in SQLite'
+  }),
+  [STAT_KEYS.lifetimeMailboxMessagesReceivedRoundParticipationCompleted]: new clientMetrics.Gauge({
+    name: STAT_KEYS.lifetimeMailboxMessagesReceivedRoundParticipationCompleted,
+    help: 'Lifetime roundParticipationCompleted messages received, persisted in SQLite'
+  }),
+  [STAT_KEYS.lifetimeMailboxMessagesReceivedIncomingLightningPayment]: new clientMetrics.Gauge({
+    name: STAT_KEYS.lifetimeMailboxMessagesReceivedIncomingLightningPayment,
+    help: 'Lifetime incomingLightningPayment messages received, persisted in SQLite'
+  }),
+  [STAT_KEYS.lifetimeMailboxMessagesReceivedRecoveryVtxoIds]: new clientMetrics.Gauge({
+    name: STAT_KEYS.lifetimeMailboxMessagesReceivedRecoveryVtxoIds,
+    help: 'Lifetime recoveryVtxoIds messages received, persisted in SQLite'
+  }),
   [STAT_KEYS.lifetimeRegistrations]: new clientMetrics.Gauge({
     name: STAT_KEYS.lifetimeRegistrations,
     help: 'Lifetime device registrations created, persisted in SQLite'
@@ -381,9 +397,20 @@ async function sendMailboxNotificationToRecipients({
   return successfulSends;
 }
 
-async function recordProcessedMailboxMessage(store, mailboxId, checkpoint, stats) {
-  await store.recordMailboxMessage(mailboxId, checkpoint, stats);
+async function recordProcessedMailboxMessage(store, mailboxId, checkpoint, stats, messageType = null) {
+  await store.recordMailboxMessage(mailboxId, checkpoint, stats, messageType);
   lifetimeMetrics[STAT_KEYS.lifetimeMailboxMessagesReceived].inc();
+  if (messageType) {
+    const typeMetricKey = {
+      arkoor: STAT_KEYS.lifetimeMailboxMessagesReceivedArkoor,
+      roundParticipationCompleted: STAT_KEYS.lifetimeMailboxMessagesReceivedRoundParticipationCompleted,
+      incomingLightningPayment: STAT_KEYS.lifetimeMailboxMessagesReceivedIncomingLightningPayment,
+      recoveryVtxoIds: STAT_KEYS.lifetimeMailboxMessagesReceivedRecoveryVtxoIds
+    }[messageType];
+    if (typeMetricKey) {
+      lifetimeMetrics[typeMetricKey].inc();
+    }
+  }
   if (stats.vtxoCount > 0) {
     lifetimeMetrics[STAT_KEYS.lifetimeVtxosProcessed].inc(stats.vtxoCount);
   }
@@ -425,7 +452,7 @@ async function processMailboxMessage(message, mailboxId, sender, store, config) 
 
   // Always advance checkpoint after processing, even if no sends succeeded,
   // to avoid repeated delivery attempts for the same message.
-  await recordProcessedMailboxMessage(store, mailboxId, checkpoint, stats);
+  await recordProcessedMailboxMessage(store, mailboxId, checkpoint, stats, resolvedMessage.type);
 }
 
 // ─── per-mailbox subscription worker ────────────────────────────────────────
