@@ -26,6 +26,10 @@ WHERE stat_key IN (
   'lifetime_vtxos_processed',
   'lifetime_sats_processed',
   'lifetime_mailbox_messages_received',
+  'lifetime_mailbox_messages_received_arkoor',
+  'lifetime_mailbox_messages_received_round_participation_completed',
+  'lifetime_mailbox_messages_received_incoming_lightning_payment',
+  'lifetime_mailbox_messages_received_recovery_vtxo_ids',
   'lifetime_registrations',
   'lifetime_unregistrations',
   'lifetime_stale_device_removals'
