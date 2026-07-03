@@ -56,6 +56,8 @@ class ApnsSender {
     paymentHashCount,
     hasPaymentHash,
     recoveryVtxoCount,
+    amountSat,
+    success,
     mailboxId,
     deviceToken,
     topic
@@ -68,6 +70,8 @@ class ApnsSender {
       paymentHashCount,
       hasPaymentHash,
       recoveryVtxoCount,
+      amountSat,
+      success,
       mailboxId,
       topic
     });
@@ -113,6 +117,8 @@ class ApnsSender {
     paymentHashCount,
     hasPaymentHash,
     recoveryVtxoCount,
+    amountSat,
+    success,
     mailboxId,
     topic
   }) {
@@ -153,10 +159,13 @@ class ApnsSender {
           type: 'mailbox_incoming_lightning_payment',
           checkpoint,
           has_payment_hash: hasPaymentHash,
+          amount_sat: amountSat,
           mailbox_id: mailboxId
         };
         note.alert = {
-          title: 'Incoming payment',
+          title: amountSat > 0
+            ? `Receiving ₿${amountSat.toLocaleString('en-US')}`
+            : 'Incoming payment',
           body: 'Open Arké to accept it.'
         };
         return note;
@@ -170,6 +179,20 @@ class ApnsSender {
           recovery_vtxo_count: recoveryVtxoCount,
           mailbox_id: mailboxId
         };
+        return note;
+      }
+
+      case 'lightningSendFinished': {
+        this._configureAlertNotification(note);
+        note.payload = {
+          type: 'mailbox_lightning_send_finished',
+          checkpoint,
+          success: Boolean(success),
+          mailbox_id: mailboxId
+        };
+        note.alert = success
+          ? { title: 'Payment sent', body: 'Your Lightning payment completed.' }
+          : { title: 'Payment failed', body: 'Your Lightning payment did not go through.' };
         return note;
       }
 

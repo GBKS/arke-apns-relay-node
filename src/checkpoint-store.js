@@ -3,11 +3,13 @@ const sqlite3 = require('sqlite3');
 const STAT_KEYS = Object.freeze({
   lifetimeVtxosProcessed: 'lifetime_vtxos_processed',
   lifetimeSatsProcessed: 'lifetime_sats_processed',
+  lifetimeSatsNotifiedIncomingLightning: 'lifetime_sats_notified_incoming_lightning',
   lifetimeMailboxMessagesReceived: 'lifetime_mailbox_messages_received',
   lifetimeMailboxMessagesReceivedArkoor: 'lifetime_mailbox_messages_received_arkoor',
   lifetimeMailboxMessagesReceivedRoundParticipationCompleted: 'lifetime_mailbox_messages_received_round_participation_completed',
   lifetimeMailboxMessagesReceivedIncomingLightningPayment: 'lifetime_mailbox_messages_received_incoming_lightning_payment',
   lifetimeMailboxMessagesReceivedRecoveryVtxoIds: 'lifetime_mailbox_messages_received_recovery_vtxo_ids',
+  lifetimeMailboxMessagesReceivedLightningSendFinished: 'lifetime_mailbox_messages_received_lightning_send_finished',
   lifetimeRegistrations: 'lifetime_registrations',
   lifetimeUnregistrations: 'lifetime_unregistrations',
   lifetimeStaleDeviceRemovals: 'lifetime_stale_device_removals'
@@ -210,21 +212,23 @@ class CheckpointStore {
     });
   }
 
-  async recordMailboxMessage(mailboxId, checkpoint, { vtxoCount, totalSats }, messageType = null) {
+  async recordMailboxMessage(mailboxId, checkpoint, { vtxoCount, totalSats, lightningReceiveSats = 0 }, messageType = null) {
     await this.run('BEGIN IMMEDIATE');
     try {
       await this._setCheckpoint(mailboxId, checkpoint);
       const statsUpdate = {
         [STAT_KEYS.lifetimeMailboxMessagesReceived]: 1,
         [STAT_KEYS.lifetimeVtxosProcessed]: vtxoCount,
-        [STAT_KEYS.lifetimeSatsProcessed]: totalSats
+        [STAT_KEYS.lifetimeSatsProcessed]: totalSats,
+        [STAT_KEYS.lifetimeSatsNotifiedIncomingLightning]: lightningReceiveSats
       };
       if (messageType) {
         const typeKey = {
           arkoor: STAT_KEYS.lifetimeMailboxMessagesReceivedArkoor,
           roundParticipationCompleted: STAT_KEYS.lifetimeMailboxMessagesReceivedRoundParticipationCompleted,
           incomingLightningPayment: STAT_KEYS.lifetimeMailboxMessagesReceivedIncomingLightningPayment,
-          recoveryVtxoIds: STAT_KEYS.lifetimeMailboxMessagesReceivedRecoveryVtxoIds
+          recoveryVtxoIds: STAT_KEYS.lifetimeMailboxMessagesReceivedRecoveryVtxoIds,
+          lightningSendFinished: STAT_KEYS.lifetimeMailboxMessagesReceivedLightningSendFinished
         }[messageType];
         if (typeKey) {
           statsUpdate[typeKey] = 1;

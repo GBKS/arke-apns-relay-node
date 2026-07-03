@@ -5,8 +5,8 @@ First-draft mailbox → APNs relay prototype. For the Ark implementation by [Sec
 ## Done
 
 - Reads and subscribes to Ark mailbox RPCs (`ReadMailbox`, `SubscribeMailbox`)
-- Sends APNs notifications for mailbox `Arkoor`, `RoundParticipationCompleted`, `IncomingLightningPayment`, and `RecoveryVtxoIds` messages
-- Sends user-visible alerts for `Arkoor` and `IncomingLightningPayment`, and silent background pushes for `RoundParticipationCompleted` and `RecoveryVtxoIds`
+- Sends APNs notifications for mailbox `Arkoor`, `RoundParticipationCompleted`, `IncomingLightningPayment`, `RecoveryVtxoIds`, and `LightningSendFinished` messages
+- Sends user-visible alerts for `Arkoor`, `IncomingLightningPayment`, and `LightningSendFinished`, and silent background pushes for `RoundParticipationCompleted` and `RecoveryVtxoIds`
 - Stores a per-mailbox checkpoint in SQLite
 - Stores persistent global lifetime activity counters in SQLite and exposes them on `/metrics`
 - Supports registration fanout (`mailbox_id -> many APNs device tokens`)
@@ -69,7 +69,7 @@ cp .env.example .env
 
 ## How wallet credentials work
 
-- `mailbox_id` is the wallet's mailbox identifier bytes (hex), used as `MailboxRequest.unblinded_id`.
+- `mailbox_id` is the wallet's mailbox identifier bytes (hex), used as `MailboxRequest.mailbox_id`.
 - `authorization_hex` is a short-lived serialized `MailboxAuthorization`. When it expires the worker logs an error and pauses; the next `POST /v1/register` from the wallet delivers a fresh token and the worker resumes immediately.
 - `ark_addr` is the gRPC endpoint of the Ark server the wallet is connected to. The relay creates one cached gRPC channel per unique address.
 
@@ -104,6 +104,7 @@ The relay now persists these lifetime counters in the same SQLite database confi
 
 - `lifetime_vtxos_processed`
 - `lifetime_sats_processed`
+- `lifetime_sats_notified_incoming_lightning` (sats seen in pending-claim Lightning receive notifications; not yet-settled value, tracked separately from `lifetime_sats_processed`)
 - `lifetime_mailbox_messages_received`
 - `lifetime_registrations`
 - `lifetime_unregistrations`
