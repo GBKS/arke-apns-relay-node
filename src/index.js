@@ -47,6 +47,10 @@ const lifetimeMetrics = {
     name: STAT_KEYS.lifetimeSatsProcessed,
     help: 'Lifetime sats processed, persisted in SQLite'
   }),
+  [STAT_KEYS.lifetimeSatsNotifiedIncomingLightning]: new clientMetrics.Gauge({
+    name: STAT_KEYS.lifetimeSatsNotifiedIncomingLightning,
+    help: 'Lifetime sats seen in incomingLightningPayment notifications (pending claim, not yet settled), persisted in SQLite'
+  }),
   [STAT_KEYS.lifetimeMailboxMessagesReceived]: new clientMetrics.Gauge({
     name: STAT_KEYS.lifetimeMailboxMessagesReceived,
     help: 'Lifetime mailbox messages received, persisted in SQLite'
@@ -66,6 +70,10 @@ const lifetimeMetrics = {
   [STAT_KEYS.lifetimeMailboxMessagesReceivedRecoveryVtxoIds]: new clientMetrics.Gauge({
     name: STAT_KEYS.lifetimeMailboxMessagesReceivedRecoveryVtxoIds,
     help: 'Lifetime recoveryVtxoIds messages received, persisted in SQLite'
+  }),
+  [STAT_KEYS.lifetimeMailboxMessagesReceivedLightningSendFinished]: new clientMetrics.Gauge({
+    name: STAT_KEYS.lifetimeMailboxMessagesReceivedLightningSendFinished,
+    help: 'Lifetime lightningSendFinished messages received, persisted in SQLite'
   }),
   [STAT_KEYS.lifetimeRegistrations]: new clientMetrics.Gauge({
     name: STAT_KEYS.lifetimeRegistrations,
@@ -173,7 +181,7 @@ async function validateMailboxAuthorization(client, mailboxIdHex, authHex, check
   }
 
   const request = {
-    unblinded_id: Buffer.from(mailboxIdHex, 'hex'),
+    mailbox_id: Buffer.from(mailboxIdHex, 'hex'),
     authorization: Buffer.from(authHex, 'hex'),
     checkpoint
   };
@@ -234,6 +242,15 @@ function resolveMailboxMessage(message) {
         message.recoveryVtxoIds,
         message.recovery_vtxo_ids
       )
+    ],
+    [
+      'lightningSendFinished',
+      firstDefined(
+        envelope?.lightningSendFinished,
+        envelope?.lightning_send_finished,
+        message.lightningSendFinished,
+        message.lightning_send_finished
+      )
     ]
   ];
 
@@ -254,7 +271,7 @@ function getMailboxMessageKeys(message) {
     : [];
 
   return [...new Set([...envelope, ...topLevel])].filter(
-    (key) => key !== 'message' && key !== 'checkpoint' && key !== 'mailbox_type' && key !== 'mailboxType'
+    (key) => key !== 'message' && key !== 'checkpoint'
   );
 }
 
@@ -273,16 +290,22 @@ function summarizeArkoorMessage(arkoorMessage) {
 }
 
 function summarizeRoundParticipationCompletedMessage(roundParticipationCompletedMessage) {
+  const unlockHash =
+    roundParticipationCompletedMessage?.unlockHash
+    || roundParticipationCompletedMessage?.unlock_hash
+    || null;
+  // payment_hashes is deprecated (kept by the server for <= v0.1.1 compat); prefer unlock_hash.
   const paymentHashes =
     roundParticipationCompletedMessage?.paymentHashes
     || roundParticipationCompletedMessage?.payment_hashes
     || [];
+  const paymentHashCount = unlockHash ? 1 : paymentHashes.length;
 
   return {
     stats: { vtxoCount: 0, totalSats: 0 },
     notification: {
       messageType: 'roundParticipationCompleted',
-      paymentHashCount: paymentHashes.length
+      paymentHashCount
     }
   };
 }
@@ -292,12 +315,42 @@ function summarizeIncomingLightningPaymentMessage(incomingLightningPaymentMessag
     incomingLightningPaymentMessage?.paymentHash
     || incomingLightningPaymentMessage?.payment_hash
     || null;
+  const amountMsat = Number(
+    incomingLightningPaymentMessage?.amountMsat
+    || incomingLightningPaymentMessage?.amount_msat
+    || 0
+  );
+  const amountSat = Math.floor(amountMsat / 1000);
+
+  return {
+    // Not folded into totalSats/lifetimeSatsProcessed: this is a pending
+    // claim notification, not value already deposited in the mailbox (unlike
+    // arkoor), and the wallet may never claim it. Tracked separately below.
+    stats: { vtxoCount: 0, totalSats: 0, lightningReceiveSats: amountSat },
+    notification: {
+      messageType: 'incomingLightningPayment',
+      hasPaymentHash: Boolean(paymentHash),
+      amountSat
+    }
+  };
+}
+
+function summarizeLightningSendFinishedMessage(lightningSendFinishedMessage) {
+  const paymentHash =
+    lightningSendFinishedMessage?.paymentHash
+    || lightningSendFinishedMessage?.payment_hash
+    || null;
+  const preimage = lightningSendFinishedMessage?.preimage || null;
+  // `preimage` is an `optional bytes` field; proto-loader may hand back an
+  // empty (but non-null) buffer when it's unset, so check length, not truthiness.
+  const success = Boolean(preimage) && preimage.length > 0;
 
   return {
     stats: { vtxoCount: 0, totalSats: 0 },
     notification: {
-      messageType: 'incomingLightningPayment',
-      hasPaymentHash: Boolean(paymentHash)
+      messageType: 'lightningSendFinished',
+      hasPaymentHash: Boolean(paymentHash),
+      success
     }
   };
 }
@@ -321,7 +374,8 @@ const mailboxMessageHandlers = {
   arkoor: summarizeArkoorMessage,
   roundParticipationCompleted: summarizeRoundParticipationCompletedMessage,
   incomingLightningPayment: summarizeIncomingLightningPaymentMessage,
-  recoveryVtxoIds: summarizeRecoveryVtxoIdsMessage
+  recoveryVtxoIds: summarizeRecoveryVtxoIdsMessage,
+  lightningSendFinished: summarizeLightningSendFinishedMessage
 };
 
 async function sendMailboxNotificationToRecipients({
@@ -405,7 +459,8 @@ async function recordProcessedMailboxMessage(store, mailboxId, checkpoint, stats
       arkoor: STAT_KEYS.lifetimeMailboxMessagesReceivedArkoor,
       roundParticipationCompleted: STAT_KEYS.lifetimeMailboxMessagesReceivedRoundParticipationCompleted,
       incomingLightningPayment: STAT_KEYS.lifetimeMailboxMessagesReceivedIncomingLightningPayment,
-      recoveryVtxoIds: STAT_KEYS.lifetimeMailboxMessagesReceivedRecoveryVtxoIds
+      recoveryVtxoIds: STAT_KEYS.lifetimeMailboxMessagesReceivedRecoveryVtxoIds,
+      lightningSendFinished: STAT_KEYS.lifetimeMailboxMessagesReceivedLightningSendFinished
     }[messageType];
     if (typeMetricKey) {
       lifetimeMetrics[typeMetricKey].inc();
@@ -416,6 +471,9 @@ async function recordProcessedMailboxMessage(store, mailboxId, checkpoint, stats
   }
   if (stats.totalSats > 0) {
     lifetimeMetrics[STAT_KEYS.lifetimeSatsProcessed].inc(stats.totalSats);
+  }
+  if (stats.lightningReceiveSats > 0) {
+    lifetimeMetrics[STAT_KEYS.lifetimeSatsNotifiedIncomingLightning].inc(stats.lightningReceiveSats);
   }
 }
 
@@ -592,7 +650,7 @@ class MailboxWorker {
 
   _makeRequest(checkpoint) {
     return {
-      unblinded_id: Buffer.from(this.mailboxId, 'hex'),
+      mailbox_id: Buffer.from(this.mailboxId, 'hex'),
       authorization: Buffer.from(this.authorizationHex, 'hex'),
       checkpoint
     };
