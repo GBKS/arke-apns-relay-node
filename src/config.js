@@ -34,6 +34,7 @@ function loadConfig() {
     protoPath: path.resolve(process.cwd(), process.env.PROTO_PATH || './protos/mailbox_server.proto'),
     checkpointDb: path.resolve(process.cwd(), process.env.CHECKPOINT_DB || './relay.db'),
     subscribeRetryMs: parseIntOr(process.env.SUBSCRIBE_RETRY_MS, 3000),
+    authRetryMs: parseIntOr(process.env.AUTH_RETRY_MS, 15 * 60 * 1000),
     metricsPort: parseIntOr(process.env.METRICS_PORT, 9898),
     relayApiToken: process.env.RELAY_API_TOKEN || '',
     rateLimitWindowMs: parseIntOr(process.env.RATE_LIMIT_WINDOW_MS, 60000),

@@ -59,7 +59,8 @@ cp .env.example .env
 
 - `PROTO_PATH`: path to `mailbox_server.proto` (default: `./protos/mailbox_server.proto`).
 - `CHECKPOINT_DB`: SQLite file path for checkpoints + registration tables.
-- `SUBSCRIBE_RETRY_MS`: delay before re-subscribing after stream error/end.
+- `SUBSCRIBE_RETRY_MS`: delay before re-subscribing after a transient stream error/end.
+- `AUTH_RETRY_MS`: delay before retrying after a mailbox authorization is rejected (expired/invalid), instead of the short `SUBSCRIBE_RETRY_MS` interval (default `900000` / 15 min). A fresh `POST /v1/register` wakes the worker immediately regardless of this delay, so it's just a safety-net ceiling.
 - `METRICS_PORT`: HTTP port for health/metrics/registration endpoints.
 - `DRY_RUN=1`: do not send APNs, but still process and advance checkpoints.
 - `RELAY_API_TOKEN`: if set, `/v1/*` endpoints require either `x-relay-token: <token>` or `Authorization: Bearer <token>`.
