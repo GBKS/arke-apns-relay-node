@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const express = require('express');
 const pino = require('pino');
 const clientMetrics = require('prom-client');
+const grpc = require('@grpc/grpc-js');
 
 const { loadConfig } = require('./config');
 const { CheckpointStore, STAT_KEYS } = require('./checkpoint-store');
@@ -515,6 +516,19 @@ async function processMailboxMessage(message, mailboxId, sender, store, config) 
 
 // ─── per-mailbox subscription worker ────────────────────────────────────────
 
+// A rejected/expired mailbox authorization surfaces as UNAUTHENTICATED or
+// PERMISSION_DENIED from the Ark server (or, on older servers, only shows up
+// in the error message). Distinguishing this from transient network errors
+// lets the worker stop hammering the server on the short retry interval and
+// instead wait for a fresh token via re-registration (see `refreshAuth`).
+function isAuthError(err) {
+  if (!err) return false;
+  if (err.code === grpc.status.UNAUTHENTICATED || err.code === grpc.status.PERMISSION_DENIED) {
+    return true;
+  }
+  return /unauthenticated|permission.denied|expired|invalid.authorization/i.test(String(err.message || ''));
+}
+
 class MailboxWorker {
   constructor({ mailboxId, arkAddr, authorizationHex, store, sender, clientFactory, config }) {
     this.mailboxId = mailboxId;
@@ -561,16 +575,22 @@ class MailboxWorker {
 
   async _loop() {
     while (!this._stopped) {
+      let authFailure = false;
       try {
         const client = this._clientFactory(this.arkAddr);
         const checkpoint = await this._backfill(client);
         this._log.info({ checkpoint }, 'backfill complete, starting subscription stream');
         await this._subscribe(client, checkpoint);
       } catch (err) {
-        this._log.error({ err }, 'worker loop iteration failed');
+        authFailure = isAuthError(err);
+        if (authFailure) {
+          this._log.warn({ err }, 'mailbox authorization rejected; pausing until a fresh token arrives via re-registration');
+        } else {
+          this._log.error({ err }, 'worker loop iteration failed');
+        }
       }
       if (!this._stopped) {
-        await this._sleep(this._config.subscribeRetryMs);
+        await this._sleep(authFailure ? this._config.authRetryMs : this._config.subscribeRetryMs);
       }
     }
     this._loopPromise = null;
@@ -601,6 +621,7 @@ class MailboxWorker {
   async _subscribe(client, checkpoint) {
     const call = subscribeMailbox(client, this._makeRequest(checkpoint));
     this._currentCall = call;
+    let streamErr = null;
 
     await new Promise((resolve) => {
       let settled = false;
@@ -630,6 +651,7 @@ class MailboxWorker {
         }
 
         this._log.warn({ err }, 'subscription stream error, reconnecting');
+        streamErr = err;
         finish();
       });
 
@@ -646,6 +668,7 @@ class MailboxWorker {
     });
 
     this._currentCall = null;
+    if (streamErr) throw streamErr;
   }
 
   _makeRequest(checkpoint) {
