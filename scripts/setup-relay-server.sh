@@ -125,6 +125,17 @@ main() {
   echo "Save this value. You will need it for /v1 API calls."
   echo
 
+  prompt_yes_no ENABLE_ADMIN_API "Expose the read-only admin API (/insights/v1, event log + worker state) through nginx?" "yes"
+  ADMIN_API_TOKEN=""
+  if [[ "$ENABLE_ADMIN_API" == "1" ]]; then
+    ADMIN_API_TOKEN="$(openssl rand -hex 32)"
+    echo
+    echo "Generated ADMIN_API_TOKEN: $ADMIN_API_TOKEN"
+    echo "Save this value. Your dashboard sends it as 'Authorization: Bearer <token>'."
+    echo "Never ship it inside an app; it is separate from RELAY_API_TOKEN for that reason."
+    echo
+  fi
+
   local ssh_target
   ssh_target="$SSH_USER@$SSH_HOST"
 
@@ -154,7 +165,7 @@ main() {
 
   echo "Running remote setup..."
   ssh "$ssh_target" bash -s -- \
-    "$DOMAIN" "$REPO_URL" "$REMOTE_BASE" "$APNS_KEY_ID" "$APNS_TEAM_ID" "$APNS_TOPIC" "$APNS_PRODUCTION" "$RELAY_API_TOKEN" "$INSTALL_CERT" "$CERTBOT_EMAIL" "$CONFIGURE_UFW" "$remote_proto_tmp" "$remote_core_proto_tmp" "$remote_key_tmp" <<'REMOTE_SCRIPT'
+    "$DOMAIN" "$REPO_URL" "$REMOTE_BASE" "$APNS_KEY_ID" "$APNS_TEAM_ID" "$APNS_TOPIC" "$APNS_PRODUCTION" "$RELAY_API_TOKEN" "$INSTALL_CERT" "$CERTBOT_EMAIL" "$CONFIGURE_UFW" "$remote_proto_tmp" "$remote_core_proto_tmp" "$remote_key_tmp" "$ENABLE_ADMIN_API" "$ADMIN_API_TOKEN" <<'REMOTE_SCRIPT'
 set -euo pipefail
 
 DOMAIN="$1"
@@ -171,6 +182,8 @@ CONFIGURE_UFW="${11}"
 REMOTE_PROTO_TMP="${12}"
 REMOTE_CORE_PROTO_TMP="${13}"
 REMOTE_KEY_TMP="${14}"
+ENABLE_ADMIN_API="${15}"
+ADMIN_API_TOKEN="${16:-}"
 
 if ! command -v sudo >/dev/null 2>&1; then
   echo "sudo is required on the remote server" >&2
@@ -241,6 +254,11 @@ RELAY_API_TOKEN=$RELAY_API_TOKEN
 RATE_LIMIT_WINDOW_MS=60000
 RATE_LIMIT_MAX=30
 TRUST_PROXY=1
+
+EVENTS_DB=$REMOTE_BASE/data/relay-events.db
+EVENT_RETENTION_DAYS=30
+ADMIN_API_TOKEN=$ADMIN_API_TOKEN
+ADMIN_CORS_ORIGIN=localhost
 EOF
 
 sudo chown arke-relay:arke-relay "$REMOTE_BASE/app/.env"
@@ -274,6 +292,20 @@ EOF
 sudo systemctl daemon-reload
 sudo systemctl enable --now arke-apns-relay
 
+ADMIN_LOCATION_BLOCK=""
+if [[ "$ENABLE_ADMIN_API" == "1" ]]; then
+  ADMIN_LOCATION_BLOCK='
+    location /insights/v1/ {
+        proxy_pass http://127.0.0.1:9898;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+'
+fi
+
 sudo tee /etc/nginx/sites-available/$DOMAIN > /dev/null <<EOF
 server {
     listen 80;
@@ -288,6 +320,7 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
     }
 
+$ADMIN_LOCATION_BLOCK
     location = /healthz {
         proxy_pass http://127.0.0.1:9898/healthz;
     }
@@ -329,6 +362,9 @@ REMOTE_SCRIPT
   echo "Done. Quick checks:"
   echo "curl -si https://$DOMAIN/healthz"
   echo "curl -si -H 'x-relay-token: $RELAY_API_TOKEN' 'https://$DOMAIN/v1/registrations?mailbox_id=<MAILBOX_ID>'"
+  if [[ "$ENABLE_ADMIN_API" == "1" ]]; then
+    echo "curl -s -H 'Authorization: Bearer $ADMIN_API_TOKEN' 'https://$DOMAIN/insights/v1/summary'"
+  fi
 }
 
 main "$@"

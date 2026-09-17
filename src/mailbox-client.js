@@ -18,9 +18,62 @@ function userAgentInterceptor(options, nextCall) {
   });
 }
 
+const STATUS_NAMES = Object.freeze(
+  Object.fromEntries(
+    Object.entries(grpc.status)
+      .filter(([, value]) => typeof value === 'number')
+      .map(([key, value]) => [value, key])
+  )
+);
+
+function statusName(code) {
+  return STATUS_NAMES[code] || String(code);
+}
+
+// Reports every finished RPC (unary or stream) to `onCall` with its final
+// status and duration. For SubscribeMailbox the duration is the stream's
+// lifetime. A throwing `onCall` must never break the RPC itself.
+function createCallReportInterceptor(arkAddr, onCall) {
+  return function callReportInterceptor(options, nextCall) {
+    const startedAt = Date.now();
+    const method = String(options.method_definition?.path || '').split('/').pop() || 'unknown';
+    const streaming = Boolean(options.method_definition?.responseStream);
+    let mailboxId = null;
+
+    return new grpc.InterceptingCall(nextCall(options), {
+      start(metadata, listener, next) {
+        next(metadata, {
+          onReceiveStatus(status, nextStatus) {
+            try {
+              onCall({
+                method,
+                streaming,
+                arkAddr,
+                mailboxId,
+                code: status.code,
+                codeName: statusName(status.code),
+                details: status.details || '',
+                durationMs: Date.now() - startedAt
+              });
+            } catch (_) {}
+            nextStatus(status);
+          }
+        });
+      },
+      sendMessage(message, next) {
+        if (Buffer.isBuffer(message?.mailbox_id)) {
+          mailboxId = message.mailbox_id.toString('hex');
+        }
+        next(message);
+      }
+    });
+  };
+}
+
 // Returns a factory function `getClient(arkAddr)` that creates (and caches)
-// one gRPC channel per unique Ark server address.
-function createClientFactory(protoPath) {
+// one gRPC channel per unique Ark server address. If `onCall` is given it is
+// invoked once per finished RPC (see `createCallReportInterceptor`).
+function createClientFactory(protoPath, { onCall } = {}) {
   const packageDef = protoLoader.loadSync(protoPath, {
     keepCase: true,
     longs: String,
@@ -42,9 +95,11 @@ function createClientFactory(protoPath) {
       ? grpc.credentials.createSsl()
       : grpc.credentials.createInsecure();
     const addr = arkAddr.replace(/^https?:\/\//, '');
-    const client = new mailbox.MailboxService(addr, creds, {
-      interceptors: [userAgentInterceptor]
-    });
+    const interceptors = [userAgentInterceptor];
+    if (onCall) {
+      interceptors.push(createCallReportInterceptor(arkAddr, onCall));
+    }
+    const client = new mailbox.MailboxService(addr, creds, { interceptors });
     cache.set(arkAddr, client);
     return client;
   };
@@ -81,6 +136,7 @@ function subscribeMailbox(client, req) {
 
 module.exports = {
   createClientFactory,
+  statusName,
   readMailbox,
   subscribeMailbox
 };
