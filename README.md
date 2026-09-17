@@ -169,7 +169,7 @@ New installs get this from `setup-relay-server.sh`. On a server that is already 
 ./scripts/enable-insights-api.sh
 ```
 
-The script generates an `ADMIN_API_TOKEN` and adds it to the server's `.env` (or keeps the one already there), adds the nginx block below to the relay's site config (backing the file up first and restoring it if `nginx -t` fails), reloads nginx, restarts the relay, and prints the token with a ready-made `curl` check. It is safe to run again, which is also how you look the token up later.
+The script generates an `ADMIN_API_TOKEN` and adds it to the server's `.env` (or keeps the one already there), then forwards `/insights/v1/` in whichever web server already forwards `/v1/` to the relay: a Caddyfile at `/etc/caddy/Caddyfile`, or an nginx site config. It backs the config up first and restores it if the web server rejects the result. Finally it restarts the relay and prints the token with a ready-made `curl` check. It is safe to run again, which is also how you look the token up later.
 
 To do the same by hand:
 
@@ -187,9 +187,17 @@ location /insights/v1/ {
 }
 ```
 
+   With Caddy instead, add this inside the relay's site block in `/etc/caddy/Caddyfile`, next to `handle /v1/*`, then `sudo caddy adapt --config /etc/caddy/Caddyfile > /dev/null && sudo systemctl reload caddy`:
+
+```
+handle /insights/v1/* {
+    reverse_proxy localhost:9898
+}
+```
+
 3. `sudo systemctl restart arke-apns-relay`
 
-To keep the admin API off the public internet instead, skip step 2 and reach it through an SSH tunnel: `ssh -L 9898:127.0.0.1:9898 <server>`, then use `http://localhost:9898/insights/v1/...`.
+To keep the insights API off the public internet instead, skip step 2 and reach it through an SSH tunnel: `ssh -L 9898:127.0.0.1:9898 <server>`, then use `http://localhost:9898/insights/v1/...`.
 
 ## iOS registration API
 
