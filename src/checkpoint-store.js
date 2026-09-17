@@ -53,6 +53,19 @@ class CheckpointStore {
       );
     `);
 
+    // What the auth wake scheduler has already sent for each mailbox's current
+    // token. `auth_expires_at` identifies that token: a row about a different
+    // expiry is stale and treated as absent.
+    await this.run(`
+      CREATE TABLE IF NOT EXISTS auth_wake (
+        mailbox_id TEXT PRIMARY KEY,
+        auth_expires_at INTEGER NOT NULL,
+        pre_attempts INTEGER NOT NULL DEFAULT 0,
+        post_attempts INTEGER NOT NULL DEFAULT 0,
+        last_sent_at INTEGER
+      );
+    `);
+
     await this.run(`
       CREATE TABLE IF NOT EXISTS relay_stat (
         stat_key TEXT PRIMARY KEY,
@@ -175,6 +188,57 @@ class CheckpointStore {
         }
       );
     });
+  }
+
+  getMailboxesWithDevices() {
+    return new Promise((resolve, reject) => {
+      this.db.all(
+        `SELECT m.mailbox_id, m.ark_addr, m.authorization_hex
+         FROM mailbox_registration m
+         WHERE EXISTS (SELECT 1 FROM device_registration d WHERE d.mailbox_id = m.mailbox_id)`,
+        [],
+        (err, rows) => {
+          if (err) return reject(err);
+          resolve(rows || []);
+        }
+      );
+    });
+  }
+
+  // Map of mailbox_id -> { authExpiresAt, preAttempts, postAttempts, lastSentAt }
+  getAuthWakeStates() {
+    return new Promise((resolve, reject) => {
+      this.db.all(
+        'SELECT mailbox_id, auth_expires_at, pre_attempts, post_attempts, last_sent_at FROM auth_wake',
+        [],
+        (err, rows) => {
+          if (err) return reject(err);
+          resolve(new Map((rows || []).map((row) => [row.mailbox_id, {
+            authExpiresAt: Number(row.auth_expires_at),
+            preAttempts: Number(row.pre_attempts),
+            postAttempts: Number(row.post_attempts),
+            lastSentAt: row.last_sent_at === null ? null : Number(row.last_sent_at)
+          }])));
+        }
+      );
+    });
+  }
+
+  async getAuthWakeState(mailboxId) {
+    return (await this.getAuthWakeStates()).get(mailboxId) || null;
+  }
+
+  setAuthWakeState(mailboxId, { authExpiresAt, preAttempts, postAttempts, lastSentAt }) {
+    return this.run(
+      `INSERT INTO auth_wake (mailbox_id, auth_expires_at, pre_attempts, post_attempts, last_sent_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(mailbox_id) DO UPDATE SET
+         auth_expires_at = excluded.auth_expires_at,
+         pre_attempts = excluded.pre_attempts,
+         post_attempts = excluded.post_attempts,
+         last_sent_at = excluded.last_sent_at`,
+      [mailboxId, authExpiresAt, preAttempts, postAttempts, lastSentAt]
+    );
   }
 
   countAllDevices() {

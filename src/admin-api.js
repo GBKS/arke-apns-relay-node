@@ -110,11 +110,25 @@ function createAdminRouter({
 
     const categories = {};
     let topFailures = [];
+    // What is keeping mailbox authorizations alive: wake pushes sent, and
+    // registrations by the trigger the app reported for them.
+    const authRefresh = { wakes_sent: 0, wakes_failed: 0, refreshes_after_wake: 0, refreshes_by_trigger: {} };
     if (events.enabled) {
       const totals = await events.queryTotals({ fromMs: now - hours * HOUR_MS });
       for (const row of totals) {
         const bucket = categories[row.category] || (categories[row.category] = { ok: 0, fail: 0, info: 0 });
         bucket[row.outcome] = (bucket[row.outcome] || 0) + row.count;
+      }
+      for (const row of totals) {
+        if (row.category === 'apns' && row.name === 'auth_wake') {
+          if (row.outcome === 'ok') authRefresh.wakes_sent += row.count;
+          if (row.outcome === 'fail') authRefresh.wakes_failed += row.count;
+        }
+        if (row.category === 'registration') {
+          if (row.name === 'refresh_after_wake') authRefresh.refreshes_after_wake += row.count;
+          const trigger = row.code || 'unspecified';
+          authRefresh.refreshes_by_trigger[trigger] = (authRefresh.refreshes_by_trigger[trigger] || 0) + row.count;
+        }
       }
       for (const bucket of Object.values(categories)) {
         const judged = bucket.ok + bucket.fail;
@@ -145,6 +159,7 @@ function createAdminRouter({
           worker.state !== 'auth_paused' && worker.state !== 'auth_expired' && worker.consecutive_failures >= 3
         )).length
       },
+      auth_refresh: authRefresh,
       registered_devices: await store.countAllDevices(),
       lifetime: await store.getStats(),
       event_log: await events.status?.() || { enabled: false }

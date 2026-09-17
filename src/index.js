@@ -13,6 +13,7 @@ const { createClientFactory, readMailbox, subscribeMailbox, statusName } = requi
 const { decodeVtxoSats } = require('./vtxo-decoder');
 const { EventLog, mailboxPrefix } = require('./event-log');
 const { parseAuthorizationExpiryMs, isExpired } = require('./mailbox-auth');
+const { AuthWakeScheduler, WAKE_ATTRIBUTION_WINDOW_MS } = require('./auth-wake');
 const { createAdminRouter, ADMIN_API_PATH } = require('./admin-api');
 const { version } = require('../package.json');
 
@@ -118,6 +119,13 @@ function isValidArkAddr(str) {
   } catch {
     return false;
   }
+}
+
+// Optional, app-reported reason for a registration (`foreground`, `timer`,
+// `background_task`, `wake_push`, ...). Free-form but tightly bounded, because
+// it becomes an event code and those feed the never-pruned rollups.
+function normalizeTrigger(raw) {
+  return typeof raw === 'string' && /^[a-z_]{1,32}$/.test(raw) ? raw : 'unspecified';
 }
 
 function normalizeToken(raw) {
@@ -1112,6 +1120,17 @@ function startHttpServer({ port, config, store, workerManager, clientFactory }) 
       const client = clientFactory(arkAddr);
       await validateMailboxAuthorization(client, mailboxId, authorizationHex, checkpoint);
 
+      // Read before setMailbox() so it still describes the token being replaced.
+      const trigger = normalizeTrigger(req.body?.trigger);
+      // A wake is only credited to the registration that replaces the token
+      // it was sent for, not to every registration in the following minutes.
+      const previous = await store.getMailbox(mailboxId);
+      const wakeState = await store.getAuthWakeState(mailboxId);
+      const wakeWasForPreviousToken = Boolean(wakeState?.lastSentAt)
+        && wakeState.authExpiresAt === parseAuthorizationExpiryMs(previous?.authorization_hex);
+      const sinceLastWakeMs = wakeWasForPreviousToken ? Date.now() - wakeState.lastSentAt : null;
+      const afterWake = sinceLastWakeMs !== null && sinceLastWakeMs <= WAKE_ATTRIBUTION_WINDOW_MS;
+
       await store.setMailbox(mailboxId, arkAddr, authorizationHex);
       const registrationResult = await store.registerDevice(mailboxId, deviceToken, apnsTopic);
       workerManager.ensureWorker(mailboxId, arkAddr, authorizationHex);
@@ -1127,8 +1146,20 @@ function startHttpServer({ port, config, store, workerManager, clientFactory }) 
         totalDevices,
         apnsTopic,
         deviceTokenSuffix: deviceToken.slice(-8),
-        authExpiresAt: authExpiresAt ? new Date(authExpiresAt).toISOString() : null
+        authExpiresAt: authExpiresAt ? new Date(authExpiresAt).toISOString() : null,
+        trigger
       };
+      // Counted separately from the HTTP event so the rollups can answer "what
+      // is keeping authorizations alive?": which triggers registrations come
+      // from, and how many arrive on the back of a wake push.
+      events.record({
+        category: 'registration',
+        name: afterWake ? 'refresh_after_wake' : 'refresh',
+        outcome: 'ok',
+        code: trigger,
+        mailboxId,
+        detail: { newDevice: registrationResult.inserted, sinceLastWakeMs }
+      });
       return res.status(201).json({
         status: 'registered',
         mailbox_id: mailboxId,
@@ -1296,12 +1327,36 @@ async function run() {
   await refreshLifetimeMetrics(store);
   await workerManager.startAll();
 
+  const authWake = new AuthWakeScheduler({
+    store,
+    sender,
+    events,
+    logger,
+    config,
+    onStaleDevice: async (mailboxId, deviceToken, reason) => {
+      logger.warn(
+        { mailboxId, deviceTokenSuffix: deviceToken.slice(-8), reason },
+        'removing stale APNs device token (auth wake)'
+      );
+      const removed = await store.unregisterDevice(mailboxId, deviceToken, STAT_KEYS.lifetimeStaleDeviceRemovals);
+      if (removed > 0) {
+        lifetimeMetrics[STAT_KEYS.lifetimeStaleDeviceRemovals].inc(removed);
+      }
+      if ((await store.countDevices(mailboxId)) === 0) {
+        workerManager.stopWorker(mailboxId);
+      }
+      await refreshRegistrationMetric(store);
+    }
+  });
+  authWake.start();
+
   startHttpServer({ port: config.metricsPort, config, store, workerManager, clientFactory });
 
   let shuttingDown = false;
   const shutdown = async (signal) => {
     if (shuttingDown) return;
     shuttingDown = true;
+    authWake.stop();
     workerManager.stopAll();
     sender.shutdown();
     store.close();
