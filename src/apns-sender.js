@@ -12,9 +12,25 @@ class StaleDeviceTokenError extends Error {
   }
 }
 
+// Any non-stale APNs failure. `apnsReason` is Apple's reason string (e.g.
+// `TooManyRequests`, `TopicDisallowed`) or `transport_error` when the request
+// never got an APNs response at all.
+class ApnsSendError extends Error {
+  constructor(failure, environment = '') {
+    super(`APNs send failed: ${JSON.stringify(failure)}`);
+    this.name = 'ApnsSendError';
+    this.apnsReason = failure?.response?.reason || (failure?.error ? 'transport_error' : 'unknown');
+    this.apnsStatus = failure?.status ? Number(failure.status) : null;
+    this.apnsEnvironment = environment;
+  }
+}
+
 class ApnsSender {
-  constructor(config, logger) {
+  // `onFallbackRetry({ deviceToken, reason, fromEnvironment, toEnvironment })`
+  // is called whenever a send is retried against the opposite environment.
+  constructor(config, logger, { onFallbackRetry } = {}) {
     this.logger = logger;
+    this._onFallbackRetry = onFallbackRetry || null;
     this.config = config;
     const primaryToken = {
       key: fs.readFileSync(config.keyFile),
@@ -76,6 +92,7 @@ class ApnsSender {
       topic
     });
 
+    let environment = this.primaryEnvironment;
     try {
       await this._sendViaProvider(this.primaryProvider, this.primaryEnvironment, note, deviceToken);
     } catch (err) {
@@ -95,7 +112,16 @@ class ApnsSender {
         },
         'retrying APNs send in fallback environment after stale-token response'
       );
+      if (this._onFallbackRetry) {
+        this._onFallbackRetry({
+          deviceToken,
+          reason: err.apnsReason,
+          fromEnvironment: this.primaryEnvironment,
+          toEnvironment: this.fallbackEnvironment
+        });
+      }
 
+      environment = this.fallbackEnvironment;
       await this._sendViaProvider(this.fallbackProvider, this.fallbackEnvironment, note, deviceToken);
       this.logger.info(
         {
@@ -107,6 +133,7 @@ class ApnsSender {
     }
 
     this.logger.info({ checkpoint, messageType, topic }, 'apns notification delivered');
+    return { environment };
   }
 
   _buildMailboxNotification({
@@ -222,7 +249,7 @@ class ApnsSender {
       if (reason === 'BadDeviceToken' || reason === 'Unregistered') {
         throw new StaleDeviceTokenError(deviceToken, reason, environment);
       }
-      throw new Error(`APNs send failed: ${JSON.stringify(failure)}`);
+      throw new ApnsSendError(failure, environment);
     }
   }
 
@@ -234,4 +261,4 @@ class ApnsSender {
   }
 }
 
-module.exports = { ApnsSender, StaleDeviceTokenError };
+module.exports = { ApnsSender, StaleDeviceTokenError, ApnsSendError };

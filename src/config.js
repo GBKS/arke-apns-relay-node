@@ -30,9 +30,18 @@ function loadConfig() {
     );
   }
 
+  const checkpointDb = path.resolve(process.cwd(), process.env.CHECKPOINT_DB || './relay.db');
+
   return {
     protoPath: path.resolve(process.cwd(), process.env.PROTO_PATH || './protos/mailbox_server.proto'),
-    checkpointDb: path.resolve(process.cwd(), process.env.CHECKPOINT_DB || './relay.db'),
+    checkpointDb,
+    // Defaults to a sibling of the checkpoint DB so it lands in the same
+    // writable data directory.
+    eventsDb: process.env.EVENTS_DB
+      ? path.resolve(process.cwd(), process.env.EVENTS_DB)
+      : path.join(path.dirname(checkpointDb), 'relay-events.db'),
+    eventRetentionDays: parseIntOr(process.env.EVENT_RETENTION_DAYS, 30),
+    eventMaxRows: parseIntOr(process.env.EVENT_MAX_ROWS, 2000000),
     subscribeRetryMs: parseIntOr(process.env.SUBSCRIBE_RETRY_MS, 3000),
     authRetryMs: parseIntOr(process.env.AUTH_RETRY_MS, 15 * 60 * 1000),
     metricsPort: parseIntOr(process.env.METRICS_PORT, 9898),
@@ -40,6 +49,12 @@ function loadConfig() {
     rateLimitWindowMs: parseIntOr(process.env.RATE_LIMIT_WINDOW_MS, 60000),
     rateLimitMax: parseIntOr(process.env.RATE_LIMIT_MAX, 30),
     trustProxy: parseBool(process.env.TRUST_PROXY, false),
+    adminApiToken: process.env.ADMIN_API_TOKEN || '',
+    adminCorsOrigins: (process.env.ADMIN_CORS_ORIGIN || 'localhost')
+      .split(',')
+      .map((origin) => origin.trim())
+      .filter(Boolean),
+    adminRateLimitMax: parseIntOr(process.env.ADMIN_RATE_LIMIT_MAX, 300),
     dryRun: parseBool(process.env.DRY_RUN, false),
     apns: {
       keyFile: must('APNS_KEY_FILE'),
