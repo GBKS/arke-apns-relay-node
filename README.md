@@ -159,7 +159,19 @@ curl -s -H 'Authorization: Bearer <ADMIN_API_TOKEN>' https://relay.example.com/i
 
 ### Enabling it on an existing server
 
-New installs get this from `setup-relay-server.sh`. On a server that is already running:
+New installs get this from `setup-relay-server.sh`. On a server that is already running, update it first and then run the enable script from your local machine:
+
+```bash
+./scripts/update-repo.sh
+```
+
+```bash
+./scripts/enable-insights-api.sh
+```
+
+The script generates an `ADMIN_API_TOKEN` and adds it to the server's `.env` (or keeps the one already there), adds the nginx block below to the relay's site config (backing the file up first and restoring it if `nginx -t` fails), reloads nginx, restarts the relay, and prints the token with a ready-made `curl` check. It is safe to run again, which is also how you look the token up later.
+
+To do the same by hand:
 
 1. Add `ADMIN_API_TOKEN=<openssl rand -hex 32>` to `/opt/arke-relay/app/.env` (the event log itself needs no configuration).
 2. Add this block to the nginx site config, next to `location /v1/`, then `sudo nginx -t && sudo systemctl reload nginx`:
