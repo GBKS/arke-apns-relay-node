@@ -15,6 +15,7 @@ First-draft mailbox → APNs relay prototype. For the Ark implementation by [Sec
 - Workers start/stop dynamically as devices are registered/unregistered
 - Workers resume automatically when a fresh auth token arrives via re-registration
 - Exposes `GET /healthz`, `GET /metrics`, `POST /v1/register`, `DELETE /v1/register`, `GET /v1/registrations`
+- Sends a silent `mailbox_auth_refresh` wake-up push when a mailbox authorization is about to expire (or has), so the app can renew it without the user opening it; removes devices APNs reports as uninstalled
 - Persistent event log (HTTP requests, Ark gRPC calls, APNs sends, worker state changes) with a read-only, token-protected admin API under `/insights/v1/*` for building a dashboard
 
 ## Still missing
@@ -68,6 +69,13 @@ cp .env.example .env
 - `RATE_LIMIT_MAX`: max requests per IP per window for `/v1/*` (default `30`).
 - `TRUST_PROXY=1`: enable if relay runs behind reverse proxy and should trust forwarded IP.
 
+### Authorization wake-up values
+
+- `AUTH_WAKE_ENABLED`: `1` (default) to send wake-up pushes, `0` to turn them off.
+- `AUTH_WAKE_LEAD_MS`: how long before expiry the first wake is sent (default `7200000` / 2h). A second follows at half that if the app hasn't re-registered.
+- `AUTH_WAKE_POST_EXPIRY_ATTEMPTS`: wakes sent after expiry, the first an hour after it and then one a day (default `7`). After that the relay gives up on the mailbox until it re-registers.
+- `AUTH_WAKE_MAX_PER_TICK`: max wakes per scheduler pass, one pass a minute (default `5`). This is what spreads a backlog out, e.g. on the first run after enabling.
+
 ### Event log and admin API values
 
 - `EVENTS_DB`: SQLite file for the event log (default: `relay-events.db` next to `CHECKPOINT_DB`). Separate from the checkpoint DB and safe to delete.
@@ -81,6 +89,8 @@ cp .env.example .env
 
 - `mailbox_id` is the wallet's mailbox identifier bytes (hex), used as `MailboxRequest.mailbox_id`.
 - `authorization_hex` is a short-lived serialized `MailboxAuthorization` (bark-ffi currently mints these with a fixed 24h expiry). The relay reads the expiry out of the token (33-byte mailbox id, 8-byte little-endian UNIX expiry, 64-byte signature). Once it has passed, the worker goes idle in the `auth_expired` state and makes **no** further Ark requests for that mailbox, since they could only be rejected. The next `POST /v1/register` from the wallet delivers a fresh token and the worker resumes immediately. Registering with an already-expired token is rejected locally (`authorization_expired`) without contacting the Ark server. The `201` response includes `authorization_expires_at` (UNIX seconds) so the app can schedule its refresh from the real expiry.
+- **Wake-up pushes.** Because only the wallet can mint an authorization, the relay asks the app to do it: a silent background push of type `mailbox_auth_refresh` (payload: `type`, `mailbox_id`, `authorization_expires_at`), sent 2h before expiry, again 1h before if no fresh registration arrived, then 1h after expiry and once a day for a week. It only needs the APNs device token, so it still works after the mailbox authorization has expired, and messages that arrived in the meantime are delivered on the next backfill. This is the one thing the relay does on its own initiative, and it uses nothing but the expiry inside the token the app supplied. APNs `Unregistered`/`BadDeviceToken` responses to a wake remove that device (and stop the worker when it was the last one), which is how uninstalled apps get cleaned up. iOS throttles silent pushes and never launches a force-quit app for them, so treat this as a strong fallback, not a guarantee. App-side handling is specified in [SWIFT_AUTH_WAKE_SPEC.md](SWIFT_AUTH_WAKE_SPEC.md).
+- `POST /v1/register` accepts an optional `trigger` (`foreground`, `timer`, `background_task`, `wake_push`, `token_change`; lowercase/underscore, max 32 chars). The relay counts registrations per trigger so you can see what is actually keeping authorizations alive.
 - If a token can't be parsed (unexpected length), its expiry is treated as unknown and the Ark server remains the only judge, exactly as before. A rejection from the server then puts the worker in `auth_paused`, which retries every `AUTH_RETRY_MS`.
 - `ark_addr` is the gRPC endpoint of the Ark server the wallet is connected to. The relay creates one cached gRPC channel per unique address.
 
@@ -136,8 +146,9 @@ Every HTTP request, Ark gRPC call, APNs send and worker state change is recorded
 |---|---|---|
 | `http` | `POST /v1/register`, `DELETE /v1/register`, `GET /v1/registrations`, `<METHOD> /v1/*` (rejected before routing), `unmatched` | HTTP status on success; otherwise a reason: `missing_fields`, `invalid_mailbox_id`, `invalid_authorization_hex`, `invalid_ark_addr`, `invalid_device_token`, `invalid_apns_topic`, `invalid_body`, `body_too_large`, `authorization_expired`, `ark_auth_rejected`, `ark_<grpc status>` (e.g. `ark_unavailable`), `unauthorized`, `rate_limited`, `internal_error` |
 | `ark` | `ReadMailbox`, `SubscribeMailbox` | gRPC status name (`OK`, `UNAUTHENTICATED`, `UNAVAILABLE`, …). `CANCELLED` is the relay stopping its own stream and is recorded as `info`, not `fail` |
-| `apns` | `send`, `fallback_retry`, `skipped_no_devices`, `skipped_dry_run` | APNs reason (`BadDeviceToken`, `Unregistered`, `TooManyRequests`, …) or `transport_error` |
+| `apns` | `send`, `auth_wake`, `fallback_retry`, `skipped_no_devices`, `skipped_dry_run` | APNs reason (`BadDeviceToken`, `Unregistered`, `TooManyRequests`, …) or `transport_error` |
 | `mailbox` | `message` | message type, or `unsupported` |
+| `registration` | `refresh`, `refresh_after_wake` (arrived within 30 min of a wake sent for the token it replaces) | the app-reported `trigger`, or `unspecified` |
 | `worker` | `backfilling`, `streaming`, `retrying`, `auth_paused`, `auth_expired`, `stopped`, `message_processing_error` | error code that caused the transition (`STREAM_ENDED` when the server closed the stream cleanly, `AUTH_EXPIRED` when the relay saw the token's own expiry pass) |
 | `db` | where it happened | SQLite error code |
 | `admin` | failed requests under `/insights/v1/` only | reason |
@@ -149,7 +160,7 @@ Privacy: only the first 8 hex chars of a mailbox id and the last 8 of a device t
 
 All require `Authorization: Bearer <ADMIN_API_TOKEN>` and are read-only. The path is deliberately not `/admin`, which every scanner probes; nginx should forward only the exact `/insights/v1/` prefix so that probe traffic never reaches the relay or its event log.
 
-- `GET /insights/v1/summary?hours=24` — ok/fail/info totals and failure rate per category, top 20 failures, worker counts by state (plus `flapping`: 3+ consecutive failures), registered devices, lifetime counters, event log status.
+- `GET /insights/v1/summary?hours=24` — ok/fail/info totals and failure rate per category, top 20 failures, worker counts by state (plus `flapping`: 3+ consecutive failures), `auth_refresh` (`wakes_sent`, `wakes_failed`, `refreshes_after_wake`, `refreshes_by_trigger`), registered devices, lifetime counters, event log status.
 - `GET /insights/v1/workers?state=auth_paused` — live per-mailbox worker state: `state`, `state_since`, `consecutive_failures`, `connects`, `messages_processed`, `last_message_at`, `last_auth_refresh_at`, `auth_expires_at` (ms, `null` if the token couldn't be read), `last_error`, `next_retry_at` (`null` for `auth_expired`, which only a re-registration can end). Sorted worst first.
 - `GET /insights/v1/events?category=&name=&outcome=&code=&mailbox=&limit=100` — newest first; page back with `before_id=<min_id>`. To tail, pass `since_id=<max_id>`: rows then come oldest first. Collapsed repeats update `count`/`last_ts` on their existing row and keep their id.
 - `GET /insights/v1/timeseries?hours=48&category=&name=&outcome=&code=&group_by=outcome` — hourly counts as `{ series: { <key>: [[hour_ms, count], …] } }`. `group_by` is one of `category`, `name`, `outcome`, `code`.

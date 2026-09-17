@@ -92,6 +92,16 @@ class ApnsSender {
       topic
     });
 
+    const environment = await this._sendWithFallback(note, deviceToken);
+
+    this.logger.info({ checkpoint, messageType, topic }, 'apns notification delivered');
+    return { environment };
+  }
+
+  // Sends via the primary environment and, when dual-environment mode is on,
+  // retries once in the other one after a stale-token response. Returns the
+  // environment that accepted the push.
+  async _sendWithFallback(note, deviceToken) {
     let environment = this.primaryEnvironment;
     try {
       await this._sendViaProvider(this.primaryProvider, this.primaryEnvironment, note, deviceToken);
@@ -132,7 +142,28 @@ class ApnsSender {
       );
     }
 
-    this.logger.info({ checkpoint, messageType, topic }, 'apns notification delivered');
+    return environment;
+  }
+
+  // Silent push asking the app to mint a fresh mailbox authorization and
+  // re-register. Needs only the APNs device token, so it still works after
+  // the mailbox authorization itself has expired.
+  async sendAuthRefreshWake({ mailboxId, deviceToken, topic, expiresAt }) {
+    const note = new apn.Notification();
+    note.topic = topic || this.config.topic;
+    this._configureBackgroundNotification(note);
+    note.payload = {
+      type: 'mailbox_auth_refresh',
+      mailbox_id: mailboxId,
+      authorization_expires_at: Math.floor(expiresAt / 1000)
+    };
+    // If several queue up while the phone is unreachable, deliver only one,
+    // and don't deliver a wake that is more than a few hours old at all.
+    note.collapseId = `auth-refresh-${String(mailboxId).slice(0, 32)}`;
+    note.expiry = Math.floor(Date.now() / 1000) + 6 * 60 * 60;
+
+    const environment = await this._sendWithFallback(note, deviceToken);
+    this.logger.info({ topic, environment }, 'auth refresh wake push delivered');
     return { environment };
   }
 
