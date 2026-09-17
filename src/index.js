@@ -12,6 +12,7 @@ const { ApnsSender, StaleDeviceTokenError } = require('./apns-sender');
 const { createClientFactory, readMailbox, subscribeMailbox, statusName } = require('./mailbox-client');
 const { decodeVtxoSats } = require('./vtxo-decoder');
 const { EventLog, mailboxPrefix } = require('./event-log');
+const { parseAuthorizationExpiryMs, isExpired } = require('./mailbox-auth');
 const { createAdminRouter, ADMIN_API_PATH } = require('./admin-api');
 const { version } = require('../package.json');
 
@@ -684,6 +685,7 @@ const WORKER_STATE_OUTCOMES = Object.freeze({
   streaming: 'ok',
   retrying: 'fail',
   auth_paused: 'fail',
+  auth_expired: 'fail',
   stopped: 'info'
 });
 
@@ -714,6 +716,9 @@ class MailboxWorker {
     this._lastAuthRefreshAt = null;
     this._lastError = null;
     this._nextRetryAt = null;
+    // Null when the token isn't in a format we can read; the Ark server then
+    // stays the only judge of whether it is still valid.
+    this._authExpiresAt = parseAuthorizationExpiryMs(authorizationHex);
   }
 
   _setState(state, err = null) {
@@ -756,6 +761,7 @@ class MailboxWorker {
       messages_processed: this._messagesProcessed,
       last_message_at: this._lastMessageAt,
       last_auth_refresh_at: this._lastAuthRefreshAt,
+      auth_expires_at: this._authExpiresAt,
       last_error: this._lastError,
       next_retry_at: this._nextRetryAt
     };
@@ -791,6 +797,7 @@ class MailboxWorker {
   // between retries (e.g. after an auth-expiry error).
   refreshAuth(authorizationHex) {
     this.authorizationHex = authorizationHex;
+    this._authExpiresAt = parseAuthorizationExpiryMs(authorizationHex);
     this._lastAuthRefreshAt = Date.now();
     if (this._sleepResolve) {
       this._sleepResolve();
@@ -800,6 +807,22 @@ class MailboxWorker {
 
   async _loop() {
     while (!this._stopped) {
+      // A token we can see has expired is guaranteed to be rejected, so don't
+      // spend an Ark request finding that out. Nothing but a fresh token can
+      // change the outcome, so there is no retry timer either: the worker idles
+      // until refreshAuth() (a new registration) or stop() wakes it.
+      if (isExpired(this._authExpiresAt)) {
+        const expiredAt = new Date(this._authExpiresAt).toISOString();
+        this._log.info({ expiredAt }, 'mailbox authorization expired; idle until a fresh token arrives via re-registration');
+        this._nextRetryAt = null;
+        this._setState(
+          'auth_expired',
+          Object.assign(new Error(`mailbox authorization expired at ${expiredAt}`), { code: 'AUTH_EXPIRED' })
+        );
+        await this._sleep(null);
+        continue;
+      }
+
       let authFailure = false;
       let loopErr = null;
       try {
@@ -930,9 +953,11 @@ class MailboxWorker {
     };
   }
 
+  // With `ms` null there is no timer: only refreshAuth() or stop() resolves it.
   _sleep(ms) {
     return new Promise((resolve) => {
       this._sleepResolve = resolve;
+      if (ms === null) return;
       setTimeout(() => {
         if (this._sleepResolve === resolve) this._sleepResolve = null;
         resolve();
@@ -1074,6 +1099,14 @@ function startHttpServer({ port, config, store, workerManager, clientFactory }) 
       if (!isValidApnsTopic(apnsTopic)) {
         return rejectRequest(res, 400, 'invalid_apns_topic', { error: 'apns_topic must contain only letters, numbers, dots, or dashes' });
       }
+      const authExpiresAt = parseAuthorizationExpiryMs(authorizationHex);
+      if (isExpired(authExpiresAt)) {
+        res.locals.eventDetail = { authExpiredAt: new Date(authExpiresAt).toISOString() };
+        return rejectRequest(res, 400, 'authorization_expired', {
+          error: 'registration failed',
+          detail: 'mailbox authorization expired'
+        });
+      }
 
       const checkpoint = await store.get(mailboxId);
       const client = clientFactory(arkAddr);
@@ -1093,14 +1126,17 @@ function startHttpServer({ port, config, store, workerManager, clientFactory }) 
         newDevice: registrationResult.inserted,
         totalDevices,
         apnsTopic,
-        deviceTokenSuffix: deviceToken.slice(-8)
+        deviceTokenSuffix: deviceToken.slice(-8),
+        authExpiresAt: authExpiresAt ? new Date(authExpiresAt).toISOString() : null
       };
       return res.status(201).json({
         status: 'registered',
         mailbox_id: mailboxId,
         ark_addr: arkAddr,
         device_token_suffix: deviceToken.slice(-8),
-        total_devices: totalDevices
+        total_devices: totalDevices,
+        // UNIX seconds, as encoded in the token; null if it couldn't be read.
+        authorization_expires_at: authExpiresAt ? authExpiresAt / 1000 : null
       });
     } catch (err) {
       logger.warn(

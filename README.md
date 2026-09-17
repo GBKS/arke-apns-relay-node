@@ -60,7 +60,7 @@ cp .env.example .env
 - `PROTO_PATH`: path to `mailbox_server.proto` (default: `./protos/mailbox_server.proto`).
 - `CHECKPOINT_DB`: SQLite file path for checkpoints + registration tables.
 - `SUBSCRIBE_RETRY_MS`: delay before re-subscribing after a transient stream error/end.
-- `AUTH_RETRY_MS`: delay before retrying after a mailbox authorization is rejected (expired/invalid), instead of the short `SUBSCRIBE_RETRY_MS` interval (default `900000` / 15 min). A fresh `POST /v1/register` wakes the worker immediately regardless of this delay, so it's just a safety-net ceiling.
+- `AUTH_RETRY_MS`: delay before retrying after the Ark server rejects a mailbox authorization that the relay could not itself see was expired, instead of the short `SUBSCRIBE_RETRY_MS` interval (default `900000` / 15 min). A fresh `POST /v1/register` wakes the worker immediately regardless of this delay, so it's just a safety-net ceiling. Tokens the relay can see have expired are never retried at all.
 - `METRICS_PORT`: HTTP port for health/metrics/registration endpoints.
 - `DRY_RUN=1`: do not send APNs, but still process and advance checkpoints.
 - `RELAY_API_TOKEN`: if set, `/v1/*` endpoints require either `x-relay-token: <token>` or `Authorization: Bearer <token>`.
@@ -80,7 +80,8 @@ cp .env.example .env
 ## How wallet credentials work
 
 - `mailbox_id` is the wallet's mailbox identifier bytes (hex), used as `MailboxRequest.mailbox_id`.
-- `authorization_hex` is a short-lived serialized `MailboxAuthorization`. When it expires the worker logs an error and pauses; the next `POST /v1/register` from the wallet delivers a fresh token and the worker resumes immediately.
+- `authorization_hex` is a short-lived serialized `MailboxAuthorization` (bark-ffi currently mints these with a fixed 24h expiry). The relay reads the expiry out of the token (33-byte mailbox id, 8-byte little-endian UNIX expiry, 64-byte signature). Once it has passed, the worker goes idle in the `auth_expired` state and makes **no** further Ark requests for that mailbox, since they could only be rejected. The next `POST /v1/register` from the wallet delivers a fresh token and the worker resumes immediately. Registering with an already-expired token is rejected locally (`authorization_expired`) without contacting the Ark server. The `201` response includes `authorization_expires_at` (UNIX seconds) so the app can schedule its refresh from the real expiry.
+- If a token can't be parsed (unexpected length), its expiry is treated as unknown and the Ark server remains the only judge, exactly as before. A rejection from the server then puts the worker in `auth_paused`, which retries every `AUTH_RETRY_MS`.
 - `ark_addr` is the gRPC endpoint of the Ark server the wallet is connected to. The relay creates one cached gRPC channel per unique address.
 
 4. Run relay:
@@ -133,11 +134,11 @@ Every HTTP request, Ark gRPC call, APNs send and worker state change is recorded
 
 | Category | Names | Codes |
 |---|---|---|
-| `http` | `POST /v1/register`, `DELETE /v1/register`, `GET /v1/registrations`, `<METHOD> /v1/*` (rejected before routing), `unmatched` | HTTP status on success; otherwise a reason: `missing_fields`, `invalid_mailbox_id`, `invalid_authorization_hex`, `invalid_ark_addr`, `invalid_device_token`, `invalid_apns_topic`, `invalid_body`, `body_too_large`, `ark_auth_rejected`, `ark_<grpc status>` (e.g. `ark_unavailable`), `unauthorized`, `rate_limited`, `internal_error` |
+| `http` | `POST /v1/register`, `DELETE /v1/register`, `GET /v1/registrations`, `<METHOD> /v1/*` (rejected before routing), `unmatched` | HTTP status on success; otherwise a reason: `missing_fields`, `invalid_mailbox_id`, `invalid_authorization_hex`, `invalid_ark_addr`, `invalid_device_token`, `invalid_apns_topic`, `invalid_body`, `body_too_large`, `authorization_expired`, `ark_auth_rejected`, `ark_<grpc status>` (e.g. `ark_unavailable`), `unauthorized`, `rate_limited`, `internal_error` |
 | `ark` | `ReadMailbox`, `SubscribeMailbox` | gRPC status name (`OK`, `UNAUTHENTICATED`, `UNAVAILABLE`, …). `CANCELLED` is the relay stopping its own stream and is recorded as `info`, not `fail` |
 | `apns` | `send`, `fallback_retry`, `skipped_no_devices`, `skipped_dry_run` | APNs reason (`BadDeviceToken`, `Unregistered`, `TooManyRequests`, …) or `transport_error` |
 | `mailbox` | `message` | message type, or `unsupported` |
-| `worker` | `backfilling`, `streaming`, `retrying`, `auth_paused`, `stopped`, `message_processing_error` | error code that caused the transition (`STREAM_ENDED` when the server closed the stream cleanly) |
+| `worker` | `backfilling`, `streaming`, `retrying`, `auth_paused`, `auth_expired`, `stopped`, `message_processing_error` | error code that caused the transition (`STREAM_ENDED` when the server closed the stream cleanly, `AUTH_EXPIRED` when the relay saw the token's own expiry pass) |
 | `db` | where it happened | SQLite error code |
 | `admin` | failed requests under `/insights/v1/` only | reason |
 | `relay` | `started`, `stopped` | signal |
@@ -149,7 +150,7 @@ Privacy: only the first 8 hex chars of a mailbox id and the last 8 of a device t
 All require `Authorization: Bearer <ADMIN_API_TOKEN>` and are read-only. The path is deliberately not `/admin`, which every scanner probes; nginx should forward only the exact `/insights/v1/` prefix so that probe traffic never reaches the relay or its event log.
 
 - `GET /insights/v1/summary?hours=24` — ok/fail/info totals and failure rate per category, top 20 failures, worker counts by state (plus `flapping`: 3+ consecutive failures), registered devices, lifetime counters, event log status.
-- `GET /insights/v1/workers?state=auth_paused` — live per-mailbox worker state: `state`, `state_since`, `consecutive_failures`, `connects`, `messages_processed`, `last_message_at`, `last_auth_refresh_at`, `last_error`, `next_retry_at`. Sorted worst first.
+- `GET /insights/v1/workers?state=auth_paused` — live per-mailbox worker state: `state`, `state_since`, `consecutive_failures`, `connects`, `messages_processed`, `last_message_at`, `last_auth_refresh_at`, `auth_expires_at` (ms, `null` if the token couldn't be read), `last_error`, `next_retry_at` (`null` for `auth_expired`, which only a re-registration can end). Sorted worst first.
 - `GET /insights/v1/events?category=&name=&outcome=&code=&mailbox=&limit=100` — newest first; page back with `before_id=<min_id>`. To tail, pass `since_id=<max_id>`: rows then come oldest first. Collapsed repeats update `count`/`last_ts` on their existing row and keep their id.
 - `GET /insights/v1/timeseries?hours=48&category=&name=&outcome=&code=&group_by=outcome` — hourly counts as `{ series: { <key>: [[hour_ms, count], …] } }`. `group_by` is one of `category`, `name`, `outcome`, `code`.
 

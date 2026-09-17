@@ -141,7 +141,9 @@ function createAdminRouter({
       workers: {
         total: workers.length,
         by_state: workerStates,
-        flapping: workers.filter((worker) => worker.state !== 'auth_paused' && worker.consecutive_failures >= 3).length
+        flapping: workers.filter((worker) => (
+          worker.state !== 'auth_paused' && worker.state !== 'auth_expired' && worker.consecutive_failures >= 3
+        )).length
       },
       registered_devices: await store.countAllDevices(),
       lifetime: await store.getStats(),
