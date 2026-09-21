@@ -1120,7 +1120,7 @@ function startHttpServer({ port, config, store, workerManager, clientFactory }) 
       const client = clientFactory(arkAddr);
       await validateMailboxAuthorization(client, mailboxId, authorizationHex, checkpoint);
 
-      // Read before setMailbox() so it still describes the token being replaced.
+      // Read before registerDevice() so it still describes the token being replaced.
       const trigger = normalizeTrigger(req.body?.trigger);
       // A wake is only credited to the registration that replaces the token
       // it was sent for, not to every registration in the following minutes.
@@ -1131,8 +1131,7 @@ function startHttpServer({ port, config, store, workerManager, clientFactory }) 
       const sinceLastWakeMs = wakeWasForPreviousToken ? Date.now() - wakeState.lastSentAt : null;
       const afterWake = sinceLastWakeMs !== null && sinceLastWakeMs <= WAKE_ATTRIBUTION_WINDOW_MS;
 
-      await store.setMailbox(mailboxId, arkAddr, authorizationHex);
-      const registrationResult = await store.registerDevice(mailboxId, deviceToken, apnsTopic);
+      const registrationResult = await store.registerDevice(mailboxId, arkAddr, authorizationHex, deviceToken, apnsTopic);
       workerManager.ensureWorker(mailboxId, arkAddr, authorizationHex);
       if (registrationResult.inserted) {
         lifetimeMetrics[STAT_KEYS.lifetimeRegistrations].inc();

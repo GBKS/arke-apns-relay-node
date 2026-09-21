@@ -20,6 +20,8 @@ const ALL_STAT_KEYS = Object.freeze(Object.values(STAT_KEYS));
 class CheckpointStore {
   constructor(dbPath) {
     this.db = new sqlite3.Database(dbPath);
+    // Tail of the write queue; see _exclusive().
+    this._writeQueue = Promise.resolve();
   }
 
   async init() {
@@ -88,8 +90,8 @@ class CheckpointStore {
     });
   }
 
-  async set(mailboxId, checkpoint) {
-    await this._setCheckpoint(mailboxId, checkpoint);
+  set(mailboxId, checkpoint) {
+    return this._exclusive(() => this._setCheckpoint(mailboxId, checkpoint));
   }
 
   getDevices(mailboxId) {
@@ -121,38 +123,33 @@ class CheckpointStore {
     });
   }
 
-  async registerDevice(mailboxId, deviceToken, apnsTopic) {
-    await this.run('BEGIN IMMEDIATE');
-    try {
+  // Stores the mailbox's Ark server and latest authorization together with the
+  // device, so a registration is saved completely or not at all.
+  registerDevice(mailboxId, arkAddr, authorizationHex, deviceToken, apnsTopic) {
+    return this._transaction(async () => {
+      await this._setMailbox(mailboxId, arkAddr, authorizationHex);
       const inserted = await this._registerDevice(mailboxId, deviceToken, apnsTopic);
       if (inserted) {
         await this._incrementStats({
           [STAT_KEYS.lifetimeRegistrations]: 1
         });
       }
-      await this.run('COMMIT');
       return { inserted, updated: !inserted };
-    } catch (err) {
-      await this._rollback(err);
-    }
+    });
   }
 
-  async unregisterDevice(mailboxId, deviceToken, statKey = null) {
-    await this.run('BEGIN IMMEDIATE');
-    try {
+  unregisterDevice(mailboxId, deviceToken, statKey = null) {
+    return this._transaction(async () => {
       const result = await this._unregisterDevice(mailboxId, deviceToken);
       const removed = result.changes || 0;
       if (removed > 0 && statKey) {
         await this._incrementStats({ [statKey]: removed });
       }
-      await this.run('COMMIT');
       return removed;
-    } catch (err) {
-      await this._rollback(err);
-    }
+    });
   }
 
-  setMailbox(mailboxId, arkAddr, authorizationHex) {
+  _setMailbox(mailboxId, arkAddr, authorizationHex) {
     return this.run(
       `INSERT INTO mailbox_registration (mailbox_id, ark_addr, authorization_hex, updated_at)
        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
@@ -229,7 +226,7 @@ class CheckpointStore {
   }
 
   setAuthWakeState(mailboxId, { authExpiresAt, preAttempts, postAttempts, lastSentAt }) {
-    return this.run(
+    return this._exclusive(() => this.run(
       `INSERT INTO auth_wake (mailbox_id, auth_expires_at, pre_attempts, post_attempts, last_sent_at)
        VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(mailbox_id) DO UPDATE SET
@@ -238,7 +235,7 @@ class CheckpointStore {
          post_attempts = excluded.post_attempts,
          last_sent_at = excluded.last_sent_at`,
       [mailboxId, authExpiresAt, preAttempts, postAttempts, lastSentAt]
-    );
+    ));
   }
 
   countAllDevices() {
@@ -276,9 +273,8 @@ class CheckpointStore {
     });
   }
 
-  async recordMailboxMessage(mailboxId, checkpoint, { vtxoCount, totalSats, lightningReceiveSats = 0 }, messageType = null) {
-    await this.run('BEGIN IMMEDIATE');
-    try {
+  recordMailboxMessage(mailboxId, checkpoint, { vtxoCount, totalSats, lightningReceiveSats = 0 }, messageType = null) {
+    return this._transaction(async () => {
       await this._setCheckpoint(mailboxId, checkpoint);
       const statsUpdate = {
         [STAT_KEYS.lifetimeMailboxMessagesReceived]: 1,
@@ -299,10 +295,31 @@ class CheckpointStore {
         }
       }
       await this._incrementStats(statsUpdate);
-      await this.run('COMMIT');
-    } catch (err) {
-      await this._rollback(err);
-    }
+    });
+  }
+
+  // Every caller shares this one connection, and SQLite tracks transactions per
+  // connection rather than per caller. A BEGIN issued while another caller's
+  // transaction is still open fails ("cannot start a transaction within a
+  // transaction"), and a standalone write would silently become part of that
+  // transaction and be lost if it rolls back. So all writes wait their turn here.
+  _exclusive(fn) {
+    const result = this._writeQueue.then(fn);
+    this._writeQueue = result.catch(() => {});
+    return result;
+  }
+
+  _transaction(fn) {
+    return this._exclusive(async () => {
+      await this.run('BEGIN IMMEDIATE');
+      try {
+        const value = await fn();
+        await this.run('COMMIT');
+        return value;
+      } catch (err) {
+        await this._rollback(err);
+      }
+    });
   }
 
   run(sql, args = []) {
