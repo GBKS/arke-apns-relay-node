@@ -41,8 +41,10 @@ function nextWakeDueAt({ expiresAt, state, nowMs, leadMs, postExpiryAttempts }) 
 // Keeps mailbox authorizations alive by asking the app to renew them.
 //
 // The relay can't mint authorizations (only the wallet holds the mailbox key)
-// and bark-ffi's tokens live 24h, so a mailbox goes dark a day after the app
-// last ran unless something wakes the app. iOS background tasks are too
+// and a token only lives as long as the wallet asked for (a fixed 24h before
+// bark-ffi 0.25; the Arke app now mints 30-day tokens and renews them at
+// mid-life), so a mailbox goes dark once its token lapses unless something
+// wakes the app. iOS background tasks are too
 // unreliable to be that something on their own. A silent push only needs the
 // APNs device token, so it works even after the mailbox token has expired.
 //

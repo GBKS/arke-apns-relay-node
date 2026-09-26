@@ -6,7 +6,7 @@ Keep the relay supplied with a non-expired mailbox authorization even when iOS d
 
 ## Context
 
-- `bark-ffi`'s `mailbox_authorization()` mints tokens with a fixed 24h expiry. Once the relay's copy expires, the mailbox stops delivering pushes until the app re-registers.
+- `bark-ffi`'s `mailbox_authorization()` mints tokens with a fixed 24h expiry. Once the relay's copy expires, the mailbox stops delivering pushes until the app re-registers. *(Amended 2026-09-26: bark-ffi 0.25 made the lifetime a parameter, `mailboxAuthorization(expirySecs:)`, and the app now mints 30-day tokens, renewed at the midpoint of their life on launch, foreground and BGTask. Work items 1–4 shipped. Item 5 is superseded by the mid-life renewal. The relay side is unchanged: it reads the expiry out of the token and schedules wakes from it, so for updated devices the wakes rarely come due. The 24h figures and `authTTL`/`authRefreshBuffer` references below describe the app as it was on 2026-09-17.)*
 - The app already refreshes in the foreground (in-process timer) and in the background (`BGAppRefreshTask`, identifier `cash.arke.refresh`, via `WalletManager.refreshRelayAuthInBackground()`).
 - Field data from the relay (2026-09-17): 124 of 151 registered mailboxes held an expired authorization, including mailboxes registered only 1–2 days earlier. `BGAppRefreshTask` alone is not keeping tokens alive.
 - The relay now reads the expiry out of the token and sends a **silent wake-up push** when it is about to lapse, or has. This amends Decision 2 in `Background_Execution.md`: the relay acts on its own initiative in exactly this one case, using nothing but the expiry inside the token the app gave it.
