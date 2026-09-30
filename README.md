@@ -147,7 +147,7 @@ Every HTTP request, Ark gRPC call, APNs send and worker state change is recorded
 | `http` | `POST /v1/register`, `DELETE /v1/register`, `GET /v1/registrations`, `<METHOD> /v1/*` (rejected before routing), `unmatched` | HTTP status on success; otherwise a reason: `missing_fields`, `invalid_mailbox_id`, `invalid_authorization_hex`, `invalid_ark_addr`, `invalid_device_token`, `invalid_apns_topic`, `invalid_body`, `body_too_large`, `authorization_expired`, `ark_auth_rejected`, `ark_<grpc status>` (e.g. `ark_unavailable`), `unauthorized`, `rate_limited`, `internal_error` |
 | `ark` | `ReadMailbox`, `SubscribeMailbox` | gRPC status name (`OK`, `UNAUTHENTICATED`, `UNAVAILABLE`, …). `CANCELLED` is the relay stopping its own stream and is recorded as `info`, not `fail` |
 | `apns` | `send`, `auth_wake`, `fallback_retry`, `skipped_no_devices`, `skipped_dry_run` | APNs reason (`BadDeviceToken`, `Unregistered`, `TooManyRequests`, …) or `transport_error` |
-| `mailbox` | `message` | message type, or `unsupported` |
+| `mailbox` | `message`, `vtxo_decode` (a VTXO amount could not be read, so sats stats undercount) | message type, or `unsupported` |
 | `registration` | `refresh`, `refresh_after_wake` (arrived within 30 min of a wake sent for the token it replaces) | the app-reported `trigger`, or `unspecified` |
 | `worker` | `backfilling`, `streaming`, `retrying`, `auth_paused`, `auth_expired`, `stopped`, `message_processing_error` | error code that caused the transition (`STREAM_ENDED` when the server closed the stream cleanly, `AUTH_EXPIRED` when the relay saw the token's own expiry pass) |
 | `db` | where it happened | SQLite error code |

@@ -159,7 +159,9 @@ function readGenesisTransition(r) {
         signature: readOptionalSchnorrSignature(r)
       };
 
-    case 3: {
+    // 3 is the legacy (v0) numbering, 4 the current one; same payload.
+    case 3:
+    case 4: {
       const userPubkey = readPublicKey(r);
       const signature = readOptionalSchnorrSignature(r);
       const kind = r.u8();
@@ -241,7 +243,10 @@ function readPolicy(r) {
         user_pubkey: readPublicKey(r)
       };
 
+    // 0x01/0x02 are the legacy (v0) HTLC tags, 0x09/0x08 the current ones;
+    // same payloads.
     case 0x01:
+    case 0x09:
       return {
         type: 'ServerHtlcSend',
         user_pubkey: readPublicKey(r),
@@ -250,6 +255,7 @@ function readPolicy(r) {
       };
 
     case 0x02:
+    case 0x08:
       return {
         type: 'ServerHtlcRecv',
         user_pubkey: readPublicKey(r),
@@ -270,7 +276,9 @@ function readPolicy(r) {
         internal_key: readXOnlyPublicKey(r)
       };
 
+    // 0x05/0x06 are the legacy hArk tags, 0x0a/0x0b the current ones.
     case 0x05:
+    case 0x0a:
       return {
         type: 'HarkLeaf',
         user_pubkey: readPublicKey(r),
@@ -278,6 +286,7 @@ function readPolicy(r) {
       };
 
     case 0x06:
+    case 0x0b:
       return {
         type: 'HarkForfeit',
         user_pubkey: readPublicKey(r),
@@ -323,10 +332,17 @@ function decodeVtxoBytes(bytes) {
   };
 }
 
+// Only the version and amount are read, not the full structure: bark keeps
+// the amount as the u64 right after the u16 version, but adds new genesis
+// transition and policy tags from time to time (e.g. lib-0.7.1), and a full
+// decode would reject every VTXO that uses one.
 function decodeVtxoSats(vtxoBuffer) {
-  const bytes = vtxoBuffer instanceof Uint8Array ? vtxoBuffer : new Uint8Array(vtxoBuffer);
-  const decoded = decodeVtxoBytes(bytes);
-  const amountSat = decoded.amount_sat;
+  const r = new Reader(vtxoBuffer instanceof Uint8Array ? vtxoBuffer : new Uint8Array(vtxoBuffer));
+  const version = r.u16();
+  if (version !== 1 && version !== 2) {
+    throw new Error(`unsupported VTXO version ${version}`);
+  }
+  const amountSat = r.u64();
   if (amountSat > BigInt(Number.MAX_SAFE_INTEGER)) {
     throw new Error('amount_sat exceeds Number.MAX_SAFE_INTEGER');
   }
