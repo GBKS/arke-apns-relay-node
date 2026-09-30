@@ -378,13 +378,19 @@ function summarizeArkoorMessage(arkoorMessage) {
   const vtxos = arkoorMessage?.vtxos || [];
   const vtxoCount = vtxos.length;
   let totalSats = 0;
+  const decodeErrors = [];
   for (const vtxo of vtxos) {
-    try { totalSats += decodeVtxoSats(vtxo); } catch (_) {}
+    try {
+      totalSats += decodeVtxoSats(vtxo);
+    } catch (err) {
+      decodeErrors.push(err);
+    }
   }
 
   return {
     stats: { vtxoCount, totalSats },
-    notification: { messageType: 'arkoor', vtxoCount, totalSats }
+    notification: { messageType: 'arkoor', vtxoCount, totalSats },
+    decodeErrors
   };
 }
 
@@ -643,7 +649,25 @@ async function processMailboxMessage(message, mailboxId, sender, store, config) 
   }
 
   const handler = mailboxMessageHandlers[resolvedMessage.type];
-  const { stats, notification } = handler(resolvedMessage.payload);
+  const { stats, notification, decodeErrors = [] } = handler(resolvedMessage.payload);
+
+  // The message is still delivered (the push just omits the amount), but an
+  // undecodable VTXO means the sats stats undercount, so make it visible.
+  if (decodeErrors.length > 0) {
+    const message = clipText(decodeErrors[0].message, 300);
+    logger.warn(
+      { checkpoint, mailboxId, messageType: resolvedMessage.type, failed: decodeErrors.length, err: decodeErrors[0] },
+      'could not decode VTXO amount; sats stats will undercount'
+    );
+    events.record({
+      category: 'mailbox',
+      name: 'vtxo_decode',
+      outcome: 'fail',
+      code: resolvedMessage.type,
+      mailboxId,
+      detail: { checkpoint, failed: decodeErrors.length, vtxoCount: stats.vtxoCount, message }
+    });
+  }
 
   events.record({
     category: 'mailbox',
