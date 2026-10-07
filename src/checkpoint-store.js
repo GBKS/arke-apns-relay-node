@@ -125,16 +125,51 @@ class CheckpointStore {
 
   // Stores the mailbox's Ark server and latest authorization together with the
   // device, so a registration is saved completely or not at all.
-  registerDevice(mailboxId, arkAddr, authorizationHex, deviceToken, apnsTopic) {
+  // With `maxDevices`, a new device beyond that number replaces the mailbox's
+  // least recently registered ones. Reinstalls leave stale tokens behind that
+  // are only cleaned up when APNs rejects them, so turning the newcomer away
+  // could lock a real user out of their own notifications.
+  registerDevice(mailboxId, arkAddr, authorizationHex, deviceToken, apnsTopic, { maxDevices = 0 } = {}) {
     return this._transaction(async () => {
       await this._setMailbox(mailboxId, arkAddr, authorizationHex);
       const inserted = await this._registerDevice(mailboxId, deviceToken, apnsTopic);
+      let evicted = 0;
       if (inserted) {
         await this._incrementStats({
           [STAT_KEYS.lifetimeRegistrations]: 1
         });
+        if (maxDevices > 0) {
+          evicted = await this._evictOldestDevices(mailboxId, deviceToken, maxDevices);
+        }
       }
-      return { inserted, updated: !inserted };
+      return { inserted, updated: !inserted, evicted };
+    });
+  }
+
+  async _evictOldestDevices(mailboxId, keepDeviceToken, maxDevices) {
+    const result = await this.run(
+      `DELETE FROM device_registration
+       WHERE mailbox_id = ? AND device_token != ? AND rowid IN (
+         SELECT rowid FROM device_registration
+         WHERE mailbox_id = ? AND device_token != ?
+         ORDER BY updated_at DESC, rowid DESC
+         LIMIT -1 OFFSET ?
+       )`,
+      [mailboxId, keepDeviceToken, mailboxId, keepDeviceToken, maxDevices - 1]
+    );
+    return result.changes || 0;
+  }
+
+  countMailboxesWithDevices() {
+    return new Promise((resolve, reject) => {
+      this.db.get(
+        'SELECT COUNT(DISTINCT mailbox_id) AS cnt FROM device_registration',
+        [],
+        (err, row) => {
+          if (err) return reject(err);
+          resolve(Number(row?.cnt || 0));
+        }
+      );
     });
   }
 

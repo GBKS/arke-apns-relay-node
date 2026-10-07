@@ -68,3 +68,24 @@ test('a failed registration saves nothing and does not block later writes', asyn
   await store.registerDevice('mb1', 'https://ark.example', 'auth', token(1), 'topic');
   assert.equal(await store.countAllDevices(), 1);
 });
+
+test('a new device beyond maxDevices replaces the least recently registered ones', async (t) => {
+  const store = await openStore(t);
+  const register = (i, opts) => store.registerDevice('mb', 'https://ark.example', 'auth', token(i), 'topic', opts);
+
+  for (let i = 0; i < 3; i += 1) await register(i);
+  // Device 0 re-registered most recently, so device 1 is now the oldest.
+  await store.run(`UPDATE device_registration SET updated_at = '2020-01-01 00:00:00'`);
+  await store.run(`UPDATE device_registration SET updated_at = '2020-01-02 00:00:00' WHERE device_token = ?`, [token(0)]);
+
+  const result = await register(3, { maxDevices: 2 });
+  assert.equal(result.inserted, true);
+  assert.equal(result.evicted, 2);
+  const remaining = (await store.getDevices('mb')).map((row) => row.device_token).sort();
+  assert.deepEqual(remaining, [token(0), token(3)]);
+
+  // Re-registering a known device never evicts anything.
+  assert.equal((await register(0, { maxDevices: 1 })).evicted, 0);
+  assert.equal(await store.countDevices('mb'), 2);
+  assert.equal(await store.countMailboxesWithDevices(), 1);
+});
