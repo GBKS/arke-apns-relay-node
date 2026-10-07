@@ -20,8 +20,7 @@ First-draft mailbox → APNs relay prototype. For the Ark implementation by [Sec
 
 ## Still missing
 
-- No APNs retry queue / dead-letter queue
-- No end-to-end test suite yet
+See [FOLLOW-UPS.md](FOLLOW-UPS.md) for open work, most important first.
 
 ## Quick start
 
@@ -257,8 +256,3 @@ List registrations:
 curl -H 'x-relay-token: <RELAY_API_TOKEN>' \
 	"http://localhost:9898/v1/registrations?mailbox_id=<UNBLINDED_ID_HEX>"
 ```
-
-## Next hardening steps
-
-- Add retry/dead-letter queue for APNs transient failures
-- Add tests for registration and stream recovery behavior
