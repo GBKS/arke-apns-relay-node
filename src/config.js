@@ -1,4 +1,5 @@
 const path = require('path');
+const { parseArkAddrAllowlist } = require('./guards');
 
 function parseBool(v, fallback = false) {
   if (v === undefined || v === null || v === '') return fallback;
@@ -43,11 +44,18 @@ function loadConfig() {
     eventRetentionDays: parseIntOr(process.env.EVENT_RETENTION_DAYS, 30),
     eventMaxRows: parseIntOr(process.env.EVENT_MAX_ROWS, 2000000),
     subscribeRetryMs: parseIntOr(process.env.SUBSCRIBE_RETRY_MS, 3000),
+    subscribeRetryMaxMs: parseIntOr(process.env.SUBSCRIBE_RETRY_MAX_MS, 5 * 60 * 1000),
     authRetryMs: parseIntOr(process.env.AUTH_RETRY_MS, 15 * 60 * 1000),
     metricsPort: parseIntOr(process.env.METRICS_PORT, 9898),
     relayApiToken: process.env.RELAY_API_TOKEN || '',
     rateLimitWindowMs: parseIntOr(process.env.RATE_LIMIT_WINDOW_MS, 60000),
     rateLimitMax: parseIntOr(process.env.RATE_LIMIT_MAX, 30),
+    registerRateLimitWindowMs: parseIntOr(process.env.REGISTER_RATE_LIMIT_WINDOW_MS, 60 * 60 * 1000),
+    registerRateLimitMax: parseIntOr(process.env.REGISTER_RATE_LIMIT_MAX, 20),
+    // null means any Ark server is accepted ("*").
+    arkAddrAllowlist: parseArkAddrAllowlist(process.env.ARK_ADDR_ALLOWLIST || undefined),
+    maxMailboxes: parseIntOr(process.env.MAX_MAILBOXES, 10000),
+    maxDevicesPerMailbox: parseIntOr(process.env.MAX_DEVICES_PER_MAILBOX, 10),
     trustProxy: parseBool(process.env.TRUST_PROXY, false),
     // Silent pushes asking the app to renew a mailbox authorization that is
     // about to expire (or has). See src/auth-wake.js for the schedule.

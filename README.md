@@ -60,13 +60,18 @@ cp .env.example .env
 
 - `PROTO_PATH`: path to `mailbox_server.proto` (default: `./protos/mailbox_server.proto`).
 - `CHECKPOINT_DB`: SQLite file path for checkpoints + registration tables.
-- `SUBSCRIBE_RETRY_MS`: delay before re-subscribing after a transient stream error/end.
+- `SUBSCRIBE_RETRY_MS`: base delay before re-subscribing after a transient stream error/end (default `3000`). It doubles with each consecutive failure, with jitter, up to `SUBSCRIBE_RETRY_MAX_MS`, so an Ark outage doesn't turn every worker into a 3-second retry loop against a struggling server. A stream that was up for at least a minute resets the count, so routine stream resets still reconnect within seconds.
+- `SUBSCRIBE_RETRY_MAX_MS`: ceiling for that backoff (default `300000` / 5 min).
 - `AUTH_RETRY_MS`: delay before retrying after the Ark server rejects a mailbox authorization that the relay could not itself see was expired, instead of the short `SUBSCRIBE_RETRY_MS` interval (default `900000` / 15 min). A fresh `POST /v1/register` wakes the worker immediately regardless of this delay, so it's just a safety-net ceiling. Tokens the relay can see have expired are never retried at all.
 - `METRICS_PORT`: HTTP port for health/metrics/registration endpoints.
 - `DRY_RUN=1`: do not send APNs, but still process and advance checkpoints.
 - `RELAY_API_TOKEN`: if set, `/v1/*` endpoints require either `x-relay-token: <token>` or `Authorization: Bearer <token>`.
 - `RATE_LIMIT_WINDOW_MS`: in-memory per-IP window for `/v1/*` requests (default `60000`).
-- `RATE_LIMIT_MAX`: max requests per IP per window for `/v1/*` (default `30`).
+- `RATE_LIMIT_MAX`: max requests per IP per window for `/v1/*` (default `30`). Applied before the token check, so requests with a wrong token count too. IPv6 clients are grouped per /64.
+- `REGISTER_RATE_LIMIT_WINDOW_MS` / `REGISTER_RATE_LIMIT_MAX`: a separate, tighter limit on `POST /v1/register` per IP (default 20 per hour). A device needs about one every two weeks; the headroom is for many phones sharing one carrier NAT address.
+- `ARK_ADDR_ALLOWLIST`: comma-separated Ark server origins (`scheme://host[:port]`) that `ark_addr` must match (default `https://ark.second.tech,https://ark.signet.2nd.dev`). `RELAY_API_TOKEN` ships in the app and is effectively public, so without this anyone could point the relay at a server they control. Other addresses are rejected with `ark_addr_not_allowed`, and stored mailboxes on servers no longer in the list don't get a worker at startup. `*` accepts any http(s) address.
+- `MAX_MAILBOXES`: the most mailboxes (with at least one device) the relay will serve; registrations for new mailboxes beyond it get `503 relay_full` before the Ark server is contacted (default `10000`, `0` = no limit).
+- `MAX_DEVICES_PER_MAILBOX`: devices kept per mailbox (default `10`, `0` = no limit). A new device beyond it replaces the least recently registered one rather than being refused, since reinstalls leave stale tokens behind.
 - `TRUST_PROXY=1`: enable if relay runs behind reverse proxy and should trust forwarded IP.
 
 ### Authorization wake-up values
@@ -92,7 +97,7 @@ cp .env.example .env
 - **Wake-up pushes.** Because only the wallet can mint an authorization, the relay asks the app to do it: a silent background push of type `mailbox_auth_refresh` (payload: `type`, `mailbox_id`, `authorization_expires_at`), sent 2h before expiry, again 1h before if no fresh registration arrived, then 1h after expiry and once a day for a week. It only needs the APNs device token, so it still works after the mailbox authorization has expired, and messages that arrived in the meantime are delivered on the next backfill. This is the one thing the relay does on its own initiative, and it uses nothing but the expiry inside the token the app supplied. APNs `Unregistered`/`BadDeviceToken` responses to a wake remove that device (and stop the worker when it was the last one), which is how uninstalled apps get cleaned up. iOS throttles silent pushes and never launches a force-quit app for them, so treat this as a strong fallback, not a guarantee. The schedule was sized for 24h tokens; with 30-day tokens renewed at mid-life, the pre-expiry wakes only reach devices that haven't run the app in over two weeks. App-side handling is specified in [SWIFT_AUTH_WAKE_SPEC.md](SWIFT_AUTH_WAKE_SPEC.md).
 - `POST /v1/register` accepts an optional `trigger` (`foreground`, `timer`, `background_task`, `wake_push`, `token_change`; lowercase/underscore, max 32 chars). The relay counts registrations per trigger so you can see what is actually keeping authorizations alive.
 - If a token can't be parsed (unexpected length), its expiry is treated as unknown and the Ark server remains the only judge, exactly as before. A rejection from the server then puts the worker in `auth_paused`, which retries every `AUTH_RETRY_MS`.
-- `ark_addr` is the gRPC endpoint of the Ark server the wallet is connected to. The relay creates one cached gRPC channel per unique address.
+- `ark_addr` is the gRPC endpoint of the Ark server the wallet is connected to, and must be in `ARK_ADDR_ALLOWLIST`. The relay creates one cached gRPC channel per unique address.
 
 4. Run relay:
 
@@ -144,7 +149,7 @@ Every HTTP request, Ark gRPC call, APNs send and worker state change is recorded
 
 | Category | Names | Codes |
 |---|---|---|
-| `http` | `POST /v1/register`, `DELETE /v1/register`, `GET /v1/registrations`, `<METHOD> /v1/*` (rejected before routing), `unmatched` | HTTP status on success; otherwise a reason: `missing_fields`, `invalid_mailbox_id`, `invalid_authorization_hex`, `invalid_ark_addr`, `invalid_device_token`, `invalid_apns_topic`, `invalid_body`, `body_too_large`, `authorization_expired`, `ark_auth_rejected`, `ark_<grpc status>` (e.g. `ark_unavailable`), `unauthorized`, `rate_limited`, `internal_error` |
+| `http` | `POST /v1/register`, `DELETE /v1/register`, `GET /v1/registrations`, `<METHOD> /v1/*` (rejected before routing), `unmatched` | HTTP status on success; otherwise a reason: `missing_fields`, `invalid_mailbox_id`, `invalid_authorization_hex`, `invalid_ark_addr`, `ark_addr_not_allowed`, `relay_full`, `invalid_device_token`, `invalid_apns_topic`, `invalid_body`, `body_too_large`, `authorization_expired`, `ark_auth_rejected`, `ark_<grpc status>` (e.g. `ark_unavailable`), `unauthorized`, `rate_limited`, `internal_error` |
 | `ark` | `ReadMailbox`, `SubscribeMailbox` | gRPC status name (`OK`, `UNAUTHENTICATED`, `UNAVAILABLE`, …). `CANCELLED` is the relay stopping its own stream and is recorded as `info`, not `fail` |
 | `apns` | `send`, `auth_wake`, `fallback_retry`, `skipped_no_devices`, `skipped_dry_run` | APNs reason (`BadDeviceToken`, `Unregistered`, `TooManyRequests`, …) or `transport_error` |
 | `mailbox` | `message`, `vtxo_decode` (a VTXO amount could not be read, so sats stats undercount) | message type, or `unsupported` |
@@ -228,7 +233,7 @@ curl -X POST http://localhost:9898/v1/register \
 	-d '{
 		"mailbox_id": "<UNBLINDED_ID_HEX>",
 		"authorization_hex": "<MAILBOX_AUTH_HEX>",
-		"ark_addr": "https://ark.example.com:3535",
+		"ark_addr": "https://ark.second.tech",
 		"device_token": "<APNS_DEVICE_TOKEN>",
 		"apns_topic": "com.example.app"
 	}'

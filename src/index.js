@@ -15,6 +15,7 @@ const { EventLog, mailboxPrefix } = require('./event-log');
 const { parseAuthorizationExpiryMs, isExpired } = require('./mailbox-auth');
 const { AuthWakeScheduler, WAKE_ATTRIBUTION_WINDOW_MS } = require('./auth-wake');
 const { createAdminRouter, ADMIN_API_PATH } = require('./admin-api');
+const { isAllowedArkAddr, retryDelayMs, rateLimitKey, createRateLimiter } = require('./guards');
 const { version } = require('../package.json');
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
@@ -251,26 +252,14 @@ function createAuthMiddleware(config) {
 function createRateLimitMiddleware(config) {
   const windowMs = Math.max(1000, Number(config.rateLimitWindowMs) || 60000);
   const max = Math.max(1, Number(config.rateLimitMax) || 30);
-  const buckets = new Map();
+  const limiter = createRateLimiter({ windowMs, max });
+  setInterval(() => limiter.sweep(), windowMs).unref();
 
   return (req, res, next) => {
-    const now = Date.now();
-    const key = String(req.ip || req.socket?.remoteAddress || 'unknown');
-    const entry = buckets.get(key);
-
-    if (!entry || now >= entry.resetAt) {
-      buckets.set(key, { count: 1, resetAt: now + windowMs });
-      return next();
-    }
-
-    entry.count += 1;
-    if (entry.count > max) {
-      const retryAfterSeconds = Math.max(1, Math.ceil((entry.resetAt - now) / 1000));
-      res.set('Retry-After', String(retryAfterSeconds));
-      return rejectRequest(res, 429, 'rate_limited', { error: 'rate_limited', retry_after_seconds: retryAfterSeconds });
-    }
-
-    return next();
+    const { allowed, retryAfterSeconds } = limiter.hit(rateLimitKey(req.ip || req.socket?.remoteAddress));
+    if (allowed) return next();
+    res.set('Retry-After', String(retryAfterSeconds));
+    return rejectRequest(res, 429, 'rate_limited', { error: 'rate_limited', retry_after_seconds: retryAfterSeconds });
   };
 }
 
@@ -879,7 +868,12 @@ class MailboxWorker {
         // Reaching here always means the connection was lost, cleanly or not.
         if (this._streamIsStable()) this._consecutiveFailures = 0;
         this._consecutiveFailures += 1;
-        const retryMs = authFailure ? this._config.authRetryMs : this._config.subscribeRetryMs;
+        // Backing off matters most when the Ark server itself is struggling:
+        // during an outage every worker fails at once, and fixed 3s retries
+        // added up to ~50k requests an hour against a server under a DoS.
+        const retryMs = authFailure
+          ? this._config.authRetryMs
+          : retryDelayMs(this._consecutiveFailures, this._config.subscribeRetryMs, this._config.subscribeRetryMaxMs);
         this._nextRetryAt = Date.now() + retryMs;
         this._setState(
           authFailure ? 'auth_paused' : 'retrying',
@@ -1011,6 +1005,11 @@ class WorkerManager {
   async startAll() {
     const mailboxes = await this._store.getAllMailboxes();
     for (const m of mailboxes) {
+      // Registered before the allowlist existed, or since removed from it.
+      if (!isAllowedArkAddr(m.ark_addr, this._config.arkAddrAllowlist)) {
+        logger.warn({ mailboxId: m.mailbox_id, arkAddr: m.ark_addr }, 'not starting worker: ark_addr is not in ARK_ADDR_ALLOWLIST');
+        continue;
+      }
       const count = await this._store.countDevices(m.mailbox_id);
       if (count > 0) {
         this._startWorker(m.mailbox_id, m.ark_addr, m.authorization_hex);
@@ -1071,7 +1070,17 @@ function startHttpServer({ port, config, store, workerManager, clientFactory }) 
   app.set('trust proxy', config.trustProxy);
   app.use(createRequestEventMiddleware());
   app.use(express.json({ limit: '32kb' }));
-  app.use('/v1', createAuthMiddleware(config), createRateLimitMiddleware(config));
+  // Rate limiting runs first so that requests with a wrong token are limited too.
+  app.use('/v1', createRateLimitMiddleware(config), createAuthMiddleware(config));
+  // Every accepted registration costs a call to the Ark server and possibly a
+  // new long-lived worker, and a real device needs one every couple of weeks.
+  // The limit is still per IP (or IPv6 /64), and carrier-grade NAT puts many
+  // phones behind one IPv4 address, so it is kept well above a single
+  // device's needs.
+  const registerRateLimit = createRateLimitMiddleware({
+    rateLimitWindowMs: config.registerRateLimitWindowMs,
+    rateLimitMax: config.registerRateLimitMax
+  });
 
   if (config.adminApiToken) {
     app.use(ADMIN_API_PATH, createAdminRouter({
@@ -1098,7 +1107,7 @@ function startHttpServer({ port, config, store, workerManager, clientFactory }) 
     res.end(await clientMetrics.register.metrics());
   });
 
-  app.post('/v1/register', async (req, res) => {
+  app.post('/v1/register', registerRateLimit, async (req, res) => {
     try {
       const mailboxId = String(req.body?.mailbox_id || '').toLowerCase();
       const authorizationHex = String(req.body?.authorization_hex || '');
@@ -1125,6 +1134,9 @@ function startHttpServer({ port, config, store, workerManager, clientFactory }) 
         return rejectRequest(res, 400, 'invalid_ark_addr', { error: 'ark_addr must be a valid http:// or https:// URL' });
       }
       res.locals.arkAddr = arkAddr;
+      if (!isAllowedArkAddr(arkAddr, config.arkAddrAllowlist)) {
+        return rejectRequest(res, 400, 'ark_addr_not_allowed', { error: 'ark_addr is not an Ark server this relay serves' });
+      }
       if (!isValidApnsToken(deviceToken)) {
         return rejectRequest(res, 400, 'invalid_device_token', { error: 'device_token must be a 64-char hex APNs token' });
       }
@@ -1138,6 +1150,14 @@ function startHttpServer({ port, config, store, workerManager, clientFactory }) 
           error: 'registration failed',
           detail: 'mailbox authorization expired'
         });
+      }
+
+      // Checked before contacting the Ark server, so a full relay costs nothing.
+      if (config.maxMailboxes > 0
+        && await store.countDevices(mailboxId) === 0
+        && await store.countMailboxesWithDevices() >= config.maxMailboxes) {
+        logger.warn({ maxMailboxes: config.maxMailboxes }, 'registration refused: MAX_MAILBOXES reached');
+        return rejectRequest(res, 503, 'relay_full', { error: 'relay is not accepting new mailboxes' });
       }
 
       const checkpoint = await store.get(mailboxId);
@@ -1155,7 +1175,10 @@ function startHttpServer({ port, config, store, workerManager, clientFactory }) 
       const sinceLastWakeMs = wakeWasForPreviousToken ? Date.now() - wakeState.lastSentAt : null;
       const afterWake = sinceLastWakeMs !== null && sinceLastWakeMs <= WAKE_ATTRIBUTION_WINDOW_MS;
 
-      const registrationResult = await store.registerDevice(mailboxId, arkAddr, authorizationHex, deviceToken, apnsTopic);
+      const registrationResult = await store.registerDevice(
+        mailboxId, arkAddr, authorizationHex, deviceToken, apnsTopic,
+        { maxDevices: config.maxDevicesPerMailbox }
+      );
       workerManager.ensureWorker(mailboxId, arkAddr, authorizationHex);
       if (registrationResult.inserted) {
         lifetimeMetrics[STAT_KEYS.lifetimeRegistrations].inc();
@@ -1167,6 +1190,7 @@ function startHttpServer({ port, config, store, workerManager, clientFactory }) 
       res.locals.eventDetail = {
         newDevice: registrationResult.inserted,
         totalDevices,
+        ...(registrationResult.evicted ? { evictedDevices: registrationResult.evicted } : {}),
         apnsTopic,
         deviceTokenSuffix: deviceToken.slice(-8),
         authExpiresAt: authExpiresAt ? new Date(authExpiresAt).toISOString() : null,
