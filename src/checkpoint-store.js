@@ -1,4 +1,12 @@
 const sqlite3 = require('sqlite3');
+const { toCheckpoint } = require('./checkpoint');
+
+// node-sqlite3 returns INTEGER columns as JS numbers, which can't hold a
+// checkpoint exactly, so they are read back as text. Bound as a decimal
+// string, a checkpoint is stored as an exact INTEGER (it fits in 63 bits until
+// the year 2248). The inner cast turns rows written by older versions, which
+// may hold a REAL, into digits too.
+const CHECKPOINT_TEXT = 'CAST(CAST(checkpoint AS INTEGER) AS TEXT) AS checkpoint';
 
 const STAT_KEYS = Object.freeze({
   lifetimeVtxosProcessed: 'lifetime_vtxos_processed',
@@ -106,11 +114,11 @@ class CheckpointStore {
   get(mailboxId) {
     return new Promise((resolve, reject) => {
       this.db.get(
-        'SELECT checkpoint FROM mailbox_checkpoint WHERE mailbox_id = ?',
+        `SELECT ${CHECKPOINT_TEXT} FROM mailbox_checkpoint WHERE mailbox_id = ?`,
         [mailboxId],
         (err, row) => {
           if (err) return reject(err);
-          resolve(row ? Number(row.checkpoint) : 0);
+          resolve(row ? row.checkpoint : '0');
         }
       );
     });
@@ -120,8 +128,8 @@ class CheckpointStore {
   // or was deleted and registered again. Then the relay can't tell which of the
   // mailbox's messages the user has already seen.
   async getCheckpoint(mailboxId) {
-    const row = await this._get('SELECT checkpoint FROM mailbox_checkpoint WHERE mailbox_id = ?', [mailboxId]);
-    return row ? Number(row.checkpoint) : null;
+    const row = await this._get(`SELECT ${CHECKPOINT_TEXT} FROM mailbox_checkpoint WHERE mailbox_id = ?`, [mailboxId]);
+    return row ? row.checkpoint : null;
   }
 
   set(mailboxId, checkpoint) {
@@ -482,7 +490,7 @@ class CheckpointStore {
         checkpoint = excluded.checkpoint,
         updated_at = CURRENT_TIMESTAMP
       `,
-      [mailboxId, checkpoint, mailboxId]
+      [mailboxId, toCheckpoint(checkpoint), mailboxId]
     );
   }
 

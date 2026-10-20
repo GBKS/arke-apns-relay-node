@@ -8,6 +8,7 @@ const grpc = require('@grpc/grpc-js');
 
 const { loadConfig } = require('./config');
 const { CheckpointStore, STAT_KEYS } = require('./checkpoint-store');
+const { toCheckpoint } = require('./checkpoint');
 const { RetentionJob } = require('./retention');
 const { ApnsSender, StaleDeviceTokenError } = require('./apns-sender');
 const { createClientFactory, readMailbox, subscribeMailbox, statusName } = require('./mailbox-client');
@@ -264,7 +265,7 @@ function createRateLimitMiddleware(config) {
   };
 }
 
-async function validateMailboxAuthorization(client, mailboxIdHex, authHex, checkpoint = 0) {
+async function validateMailboxAuthorization(client, mailboxIdHex, authHex, checkpoint = '0') {
   if (!isHex(mailboxIdHex) || !isHex(authHex)) {
     throw new Error('mailbox_id and authorization_hex must be valid hex');
   }
@@ -617,7 +618,7 @@ async function processMailboxMessage(message, mailboxId, sender, store, config) 
     return;
   }
 
-  const checkpoint = Number(message.checkpoint || 0);
+  const checkpoint = toCheckpoint(message.checkpoint);
   metricMessages.inc();
 
   const resolvedMessage = resolveMailboxMessage(message);
@@ -900,7 +901,7 @@ class MailboxWorker {
   async _backfill(client) {
     const stored = await this._store.getCheckpoint(this.mailboxId);
     const catchUp = stored === null;
-    let checkpoint = stored ?? 0;
+    let checkpoint = stored ?? '0';
     let skipped = 0;
 
     for (;;) {
@@ -910,7 +911,7 @@ class MailboxWorker {
       for (const message of messages) {
         if (catchUp) skipped += 1;
         else await this._processMessage(message);
-        checkpoint = Number(message.checkpoint || checkpoint);
+        checkpoint = toCheckpoint(message.checkpoint, checkpoint);
       }
 
       if (!response.have_more) break;
@@ -958,7 +959,7 @@ class MailboxWorker {
             code: errorCode(err),
             mailboxId: this.mailboxId,
             arkAddr: this.arkAddr,
-            detail: { checkpoint: Number(message?.checkpoint || 0), message: clipText(err.message, 300) }
+            detail: { checkpoint: message?.checkpoint ?? null, message: clipText(err.message, 300) }
           });
         } finally {
           call.resume();
