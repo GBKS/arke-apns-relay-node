@@ -60,7 +60,9 @@ function loadConfig() {
     // Silent pushes asking the app to renew a mailbox authorization that is
     // about to expire (or has). See src/auth-wake.js for the schedule.
     authWakeEnabled: parseBool(process.env.AUTH_WAKE_ENABLED, true),
+    // The wake lead is a quarter of each token's lifetime, kept within these.
     authWakeLeadMs: parseIntOr(process.env.AUTH_WAKE_LEAD_MS, 2 * 60 * 60 * 1000),
+    authWakeMaxLeadMs: parseIntOr(process.env.AUTH_WAKE_MAX_LEAD_MS, 7 * 24 * 60 * 60 * 1000),
     authWakePostExpiryAttempts: parseIntOr(process.env.AUTH_WAKE_POST_EXPIRY_ATTEMPTS, 7),
     authWakeMaxPerTick: parseIntOr(process.env.AUTH_WAKE_MAX_PER_TICK, 5),
     authWakeTickMs: parseIntOr(process.env.AUTH_WAKE_TICK_MS, 60 * 1000),

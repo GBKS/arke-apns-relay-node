@@ -10,12 +10,28 @@ const POST_EXPIRY_GRACE_MS = HOUR_MS;
 // A registration this soon after a wake is counted as caused by it.
 const WAKE_ATTRIBUTION_WINDOW_MS = 30 * 60 * 1000;
 
+// How long before expiry the wakes start: a quarter of the token's lifetime,
+// kept between `minLeadMs` and `maxLeadMs`. The app renews at mid-life, so
+// wakes only reach devices that missed that for a while, and a 24h token
+// still gets a lead of hours rather than days. Because the lifetime is
+// measured from when the relay got the token, the lead never reaches back to
+// before the registration, which would wake the app right after it
+// registered, over and over. Without a known start, `minLeadMs` applies.
+function wakeLeadMs({ expiresAt, issuedAt, minLeadMs, maxLeadMs }) {
+  if (!issuedAt || issuedAt >= expiresAt) return minLeadMs;
+  return Math.min(maxLeadMs, Math.max(minLeadMs, (expiresAt - issuedAt) / 4));
+}
+
 // When is the next wake-up push for this token due? Returns a ms timestamp,
 // or null when there is nothing (more) to send for it.
 //
-//   before expiry:  one wake `leadMs` before it, a second at half that
+//   before expiry:  the first wake `leadMs` before it, then one every half
+//                   lead, but at most a day apart, until expiry
 //   after expiry:   one shortly after, then one a day, `postExpiryAttempts`
 //                   in total, and then the relay gives up
+//
+// A 2h lead gives the original schedule (2h and 1h before expiry); a 7-day
+// lead gives one a day for the last week.
 //
 // `state` counts what has already been sent for *this* token; a new token
 // (different expiry) starts from zero, which is how a successful registration
@@ -26,9 +42,12 @@ function nextWakeDueAt({ expiresAt, state, nowMs, leadMs, postExpiryAttempts }) 
   const lastSentAt = state?.lastSentAt || null;
 
   if (nowMs < expiresAt) {
-    if (pre === 0) return expiresAt - leadMs;
-    if (pre === 1) return Math.max(expiresAt - leadMs / 2, (lastSentAt || 0) + leadMs / 2);
-    // Both pre-expiry wakes are spent; the next one is the first post-expiry.
+    const spacing = Math.min(DAY_MS, leadMs / 2);
+    // Spaced from the last wake as well, so a window that was entered late
+    // (e.g. right after deploying) doesn't send its missed wakes at once.
+    const dueAt = Math.max(expiresAt - leadMs + pre * spacing, lastSentAt ? lastSentAt + spacing : 0);
+    if (dueAt < expiresAt) return dueAt;
+    // The pre-expiry wakes are spent; the next one is the first post-expiry.
     return post < postExpiryAttempts ? expiresAt + POST_EXPIRY_GRACE_MS : null;
   }
 
@@ -72,7 +91,11 @@ class AuthWakeScheduler {
     this._timer = setInterval(() => { this.tick(); }, this._config.authWakeTickMs);
     this._timer.unref();
     this._log.info(
-      { leadMs: this._config.authWakeLeadMs, postExpiryAttempts: this._config.authWakePostExpiryAttempts },
+      {
+        minLeadMs: this._config.authWakeLeadMs,
+        maxLeadMs: this._config.authWakeMaxLeadMs,
+        postExpiryAttempts: this._config.authWakePostExpiryAttempts
+      },
       'auth wake scheduler started'
     );
   }
@@ -105,7 +128,12 @@ class AuthWakeScheduler {
           expiresAt,
           state,
           nowMs,
-          leadMs: this._config.authWakeLeadMs,
+          leadMs: wakeLeadMs({
+            expiresAt,
+            issuedAt: mailbox.authorization_since,
+            minLeadMs: this._config.authWakeLeadMs,
+            maxLeadMs: this._config.authWakeMaxLeadMs
+          }),
           postExpiryAttempts: this._config.authWakePostExpiryAttempts
         });
         if (dueAt !== null && dueAt <= nowMs) {
@@ -184,4 +212,4 @@ class AuthWakeScheduler {
   }
 }
 
-module.exports = { AuthWakeScheduler, nextWakeDueAt, WAKE_ATTRIBUTION_WINDOW_MS };
+module.exports = { AuthWakeScheduler, nextWakeDueAt, wakeLeadMs, WAKE_ATTRIBUTION_WINDOW_MS };

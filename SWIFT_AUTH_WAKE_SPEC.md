@@ -26,7 +26,7 @@ Silent background push (`apns-push-type: background`, priority 5, `content-avail
 
 - `authorization_expires_at` is UNIX seconds, the expiry of the token the relay currently holds. It may be in the past.
 - `apns-collapse-id` is set per mailbox, so a phone that was unreachable receives at most one.
-- Schedule per token: 2h before expiry; 1h before expiry if no re-registration arrived; then 1h after expiry and once a day after that, 7 times in total. Any successful `POST /v1/register` with a new token resets it.
+- Schedule per token: 2h before expiry; 1h before expiry if no re-registration arrived; then 1h after expiry and once a day after that, 7 times in total. Any successful `POST /v1/register` with a new token resets it. *(Amended 2026-10-20: the pre-expiry wakes now start a quarter of the token's lifetime before expiry, between 2h and 7 days, and repeat at most a day apart. 30-day tokens get one a day for their last week. The payload is unchanged.)*
 - Sent only to devices registered for that mailbox. Users with notifications disabled are never registered, so they never receive it.
 
 ## Where things are in the app (verified against `gbks/arke` on 2026-09-17)

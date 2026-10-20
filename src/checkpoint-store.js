@@ -87,6 +87,20 @@ class CheckpointStore {
       `);
       await this.run('PRAGMA user_version = 1');
     }
+
+    // When the relay first saw the mailbox's current authorization, in ms. With
+    // the expiry it gives the token's lifetime, which the wake schedule scales
+    // with. Older rows start from their last registration, which can be later
+    // than the token was minted and so only makes their lifetime look shorter.
+    const columns = await this._all('PRAGMA table_info(mailbox_registration)');
+    if (!columns.some((column) => column.name === 'authorization_since')) {
+      await this.run('ALTER TABLE mailbox_registration ADD COLUMN authorization_since INTEGER');
+      await this.run(`
+        UPDATE mailbox_registration
+        SET authorization_since = CAST(strftime('%s', updated_at) AS INTEGER) * 1000
+        WHERE authorization_since IS NULL
+      `);
+    }
   }
 
   get(mailboxId) {
@@ -250,15 +264,21 @@ class CheckpointStore {
     }
   }
 
+  // Re-registering with the same authorization keeps its `authorization_since`.
   _setMailbox(mailboxId, arkAddr, authorizationHex) {
     return this.run(
-      `INSERT INTO mailbox_registration (mailbox_id, ark_addr, authorization_hex, updated_at)
-       VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+      `INSERT INTO mailbox_registration (mailbox_id, ark_addr, authorization_hex, authorization_since, updated_at)
+       VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
        ON CONFLICT(mailbox_id) DO UPDATE SET
          ark_addr = excluded.ark_addr,
          authorization_hex = excluded.authorization_hex,
+         authorization_since = CASE
+           WHEN mailbox_registration.authorization_hex = excluded.authorization_hex
+             THEN mailbox_registration.authorization_since
+           ELSE excluded.authorization_since
+         END,
          updated_at = CURRENT_TIMESTAMP`,
-      [mailboxId, arkAddr, authorizationHex]
+      [mailboxId, arkAddr, authorizationHex, Date.now()]
     );
   }
 
@@ -291,7 +311,7 @@ class CheckpointStore {
   getMailboxesWithDevices() {
     return new Promise((resolve, reject) => {
       this.db.all(
-        `SELECT m.mailbox_id, m.ark_addr, m.authorization_hex
+        `SELECT m.mailbox_id, m.ark_addr, m.authorization_hex, m.authorization_since
          FROM mailbox_registration m
          WHERE EXISTS (SELECT 1 FROM device_registration d WHERE d.mailbox_id = m.mailbox_id)`,
         [],
@@ -428,6 +448,15 @@ class CheckpointStore {
       this.db.get(sql, args, (err, row) => {
         if (err) return reject(err);
         resolve(row || null);
+      });
+    });
+  }
+
+  _all(sql, args = []) {
+    return new Promise((resolve, reject) => {
+      this.db.all(sql, args, (err, rows) => {
+        if (err) return reject(err);
+        resolve(rows || []);
       });
     });
   }
