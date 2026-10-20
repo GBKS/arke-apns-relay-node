@@ -24,10 +24,6 @@ About 33 of the 47 live mailboxes minted their 30-day token on 2026-09-26..29, s
 
 ## Worth doing
 
-### Delete mailboxes whose authorization expired long ago
-
-106 of 153 mailboxes sit in `auth_expired`. Most belong to wallets that are gone: 58 mainnet mailboxes expired before 2026-08-29, 18 more before 2026-09-21, and 24 are on signet. They cost no Ark calls, but they keep devices, get wake pushes and inflate the numbers. Proposal: delete mailboxes (and their devices) whose token expired more than 30 days ago.
-
 ### Stop counting the Ark server's hourly stream close as a failure
 
 Since early October, `SubscribeMailbox` streams end with `RST_STREAM INTERNAL` after exactly 60 minutes (`streamLifetimeMs` ≈ 3,600,000), so it's a server-side limit rather than an error. These ~1,200 events a day make the `ark` and `worker` failure rates read ~50%. Record a reset after a stable stream as `info`, and keep it a failure when the stream dies young.
@@ -55,3 +51,4 @@ From the review on 2026-10-07. The allowlist, caps, backoff and rate limits from
 - **`auth_paused` workers retry every 15 min forever.** A worker lands there when the Ark server rejects a token the relay couldn't see was expired.
 - **No APNs retry or dead-letter queue** for transient send failures.
 - **No end-to-end tests** for registration and stream recovery.
+- **`MaxListenersExceededWarning` on startup:** journald on 2026-10-09 shows 11 `wakeup` listeners added to one gRPC `Connection`. Possibly a listener per worker on a shared channel, i.e. a slow leak as mailboxes grow.

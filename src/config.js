@@ -64,6 +64,9 @@ function loadConfig() {
     authWakePostExpiryAttempts: parseIntOr(process.env.AUTH_WAKE_POST_EXPIRY_ATTEMPTS, 7),
     authWakeMaxPerTick: parseIntOr(process.env.AUTH_WAKE_MAX_PER_TICK, 5),
     authWakeTickMs: parseIntOr(process.env.AUTH_WAKE_TICK_MS, 60 * 1000),
+    // Mailboxes whose authorization expired longer ago than this are deleted.
+    // 0 keeps them until their last device unregisters.
+    expiredMailboxRetentionDays: parseIntOr(process.env.EXPIRED_MAILBOX_RETENTION_DAYS, 30),
     adminApiToken: process.env.ADMIN_API_TOKEN || '',
     adminCorsOrigins: (process.env.ADMIN_CORS_ORIGIN || 'localhost')
       .split(',')

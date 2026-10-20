@@ -8,6 +8,7 @@ First-draft mailbox → APNs relay prototype. For the Ark implementation by [Sec
 - Sends APNs notifications for mailbox `Arkoor`, `RoundParticipationCompleted`, `IncomingLightningPayment`, `RecoveryVtxoIds`, and `LightningSendFinished` messages
 - Sends user-visible alerts for `Arkoor`, `IncomingLightningPayment`, and `LightningSendFinished`, and silent background pushes for `RoundParticipationCompleted` and `RecoveryVtxoIds`
 - Stores a per-mailbox checkpoint in SQLite
+- Deletes everything about a mailbox when its last device goes, or 30 days after its authorization expired; catches up silently on mailboxes it has no checkpoint for
 - Stores persistent global lifetime activity counters in SQLite and exposes them on `/metrics`
 - Supports registration fanout (`mailbox_id -> many APNs device tokens`)
 - Validates registration mailbox authorization by calling Ark `ReadMailbox`
@@ -80,6 +81,10 @@ cp .env.example .env
 - `AUTH_WAKE_POST_EXPIRY_ATTEMPTS`: wakes sent after expiry, the first an hour after it and then one a day (default `7`). After that the relay gives up on the mailbox until it re-registers.
 - `AUTH_WAKE_MAX_PER_TICK`: max wakes per scheduler pass, one pass a minute (default `5`). This is what spreads a backlog out, e.g. on the first run after enabling.
 
+### Data retention values
+
+- `EXPIRED_MAILBOX_RETENTION_DAYS`: days after a mailbox authorization expires before the relay deletes the mailbox: its authorization, devices, checkpoint and wake state (default `30`, `0` = never). Checked hourly. Tokens whose expiry can't be read are never deleted this way. By then wake pushes have long stopped, so the relay has nothing left to do for the mailbox; if the wallet comes back it registers again like a new one (see [What the relay stores](#what-the-relay-stores)).
+
 ### Event log and admin API values
 
 - `EVENTS_DB`: SQLite file for the event log (default: `relay-events.db` next to `CHECKPOINT_DB`). Separate from the checkpoint DB and safe to delete.
@@ -123,6 +128,14 @@ It runs from your local machine, prompts for required values, uploads your `.p8`
 - Checkpoint is persisted after message processing, even if APNs delivery fails, to avoid repeated delivery attempts for the same message.
 - Backfill loop continues while `have_more=true`, then switches to streaming mode.
 
+## What the relay stores
+
+Per mailbox, in `CHECKPOINT_DB`: the mailbox id, its Ark server, the latest authorization token, each device's APNs token and topic, the checkpoint (how far the relay has read; the Ark server derives it from the time a message was posted) and which wake pushes were sent. Message contents are not stored, only added to the lifetime totals below.
+
+All of it is deleted when the mailbox's last device unregisters (`DELETE /v1/register`), when APNs reports the last device as uninstalled, or `EXPIRED_MAILBOX_RETENTION_DAYS` after its authorization expired. A worker still running for the mailbox is stopped.
+
+A mailbox the relay has no checkpoint for (new, or deleted and registered again) is caught up silently: the first backfill reads to the end of the mailbox without sending pushes, because the Ark server keeps a mailbox's whole history and the relay can't tell which of it the user has seen. Mailboxes registered before this behaviour existed got a checkpoint of 0 on upgrade, so they keep notifying as before.
+
 ## Persistent lifetime metrics
 
 The relay now persists these lifetime counters in the same SQLite database configured by `CHECKPOINT_DB`, reloads them on startup, and exports them through `GET /metrics`:
@@ -151,14 +164,14 @@ Every HTTP request, Ark gRPC call, APNs send and worker state change is recorded
 | `http` | `POST /v1/register`, `DELETE /v1/register`, `GET /v1/registrations`, `<METHOD> /v1/*` (rejected before routing), `unmatched` | HTTP status on success; otherwise a reason: `missing_fields`, `invalid_mailbox_id`, `invalid_authorization_hex`, `invalid_ark_addr`, `ark_addr_not_allowed`, `relay_full`, `invalid_device_token`, `invalid_apns_topic`, `invalid_body`, `body_too_large`, `authorization_expired`, `ark_auth_rejected`, `ark_<grpc status>` (e.g. `ark_unavailable`), `unauthorized`, `rate_limited`, `internal_error` |
 | `ark` | `ReadMailbox`, `SubscribeMailbox` | gRPC status name (`OK`, `UNAUTHENTICATED`, `UNAVAILABLE`, …). `CANCELLED` is the relay stopping its own stream and is recorded as `info`, not `fail` |
 | `apns` | `send`, `auth_wake`, `fallback_retry`, `skipped_no_devices`, `skipped_dry_run` | APNs reason (`BadDeviceToken`, `Unregistered`, `TooManyRequests`, …) or `transport_error` |
-| `mailbox` | `message`, `vtxo_decode` (a VTXO amount could not be read, so sats stats undercount) | message type, or `unsupported` |
-| `registration` | `refresh`, `refresh_after_wake` (arrived within 30 min of a wake sent for the token it replaces) | the app-reported `trigger`, or `unspecified` |
+| `mailbox` | `message`, `vtxo_decode` (a VTXO amount could not be read, so sats stats undercount), `catch_up` (a mailbox without a checkpoint skipped its history without pushes) | message type, or `unsupported` |
+| `registration` | `refresh`, `refresh_after_wake` (arrived within 30 min of a wake sent for the token it replaces), `expired_deleted` (deleted by `EXPIRED_MAILBOX_RETENTION_DAYS`) | the app-reported `trigger`, or `unspecified` |
 | `worker` | `backfilling`, `streaming`, `retrying`, `auth_paused`, `auth_expired`, `stopped`, `message_processing_error` | error code that caused the transition (`STREAM_ENDED` when the server closed the stream cleanly, `AUTH_EXPIRED` when the relay saw the token's own expiry pass) |
 | `db` | where it happened | SQLite error code |
 | `admin` | failed requests under `/insights/v1/` only | reason |
 | `relay` | `started`, `stopped` | signal |
 
-Privacy: only the first 8 hex chars of a mailbox id and the last 8 of a device token are stored; authorization tokens never are. Client IPs are stored only on `401` and `429` responses.
+Privacy: only the first 8 hex chars of a mailbox id and the last 8 of a device token are stored; authorization tokens never are. Client IPs are stored only on `401` and `429` responses. The same goes for the process log (journald).
 
 ### Endpoints
 

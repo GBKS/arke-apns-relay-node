@@ -6,7 +6,8 @@ class StaleDeviceTokenError extends Error {
     const envSuffix = environment ? ` [${environment}]` : '';
     super(`APNs device token stale${envSuffix}: ${reason} (token suffix ${deviceToken.slice(-8)})`);
     this.name = 'StaleDeviceTokenError';
-    this.deviceToken = deviceToken;
+    // Not enumerable, so logging the error doesn't write out the full token.
+    Object.defineProperty(this, 'deviceToken', { value: deviceToken });
     this.apnsReason = reason;
     this.apnsEnvironment = environment;
   }
@@ -17,7 +18,9 @@ class StaleDeviceTokenError extends Error {
 // never got an APNs response at all.
 class ApnsSendError extends Error {
   constructor(failure, environment = '') {
-    super(`APNs send failed: ${JSON.stringify(failure)}`);
+    // The failure names the full device token, which must not reach the logs.
+    const { device, ...rest } = failure || {};
+    super(`APNs send failed: ${JSON.stringify(rest)}`);
     this.name = 'ApnsSendError';
     this.apnsReason = failure?.response?.reason || (failure?.error ? 'transport_error' : 'unknown');
     this.apnsStatus = failure?.status ? Number(failure.status) : null;
