@@ -33,6 +33,7 @@ test('concurrent registrations all succeed', async (t) => {
 test('concurrent writes of every kind all succeed', async (t) => {
   const store = await openStore(t);
   await store.registerDevice('mb0', 'https://ark.example', 'auth', token(0), 'topic');
+  await store.registerDevice('mb2', 'https://ark.example', 'auth', token(2), 'topic');
 
   await Promise.all([
     store.registerDevice('mb1', 'https://ark.example', 'auth', token(1), 'topic'),
@@ -43,7 +44,7 @@ test('concurrent writes of every kind all succeed', async (t) => {
   ]);
 
   const stats = await store.getStats();
-  assert.equal(await store.countAllDevices(), 1);
+  assert.equal(await store.countAllDevices(), 2);
   assert.equal(stats[STAT_KEYS.lifetimeUnregistrations], 1);
   assert.equal(stats[STAT_KEYS.lifetimeMailboxMessagesReceivedArkoor], 1);
   assert.equal(await store.get('mb1'), 5);
@@ -88,4 +89,100 @@ test('a new device beyond maxDevices replaces the least recently registered ones
   assert.equal((await register(0, { maxDevices: 1 })).evicted, 0);
   assert.equal(await store.countDevices('mb'), 2);
   assert.equal(await store.countMailboxesWithDevices(), 1);
+});
+
+async function mailboxRowCounts(store, mailboxId) {
+  const counts = {};
+  for (const table of ['device_registration', 'mailbox_registration', 'mailbox_checkpoint', 'auth_wake']) {
+    const row = await store._get(`SELECT COUNT(*) AS cnt FROM ${table} WHERE mailbox_id = ?`, [mailboxId]);
+    counts[table] = row.cnt;
+  }
+  return counts;
+}
+
+const NO_ROWS = { device_registration: 0, mailbox_registration: 0, mailbox_checkpoint: 0, auth_wake: 0 };
+
+test('unregistering the last device deletes everything stored about the mailbox', async (t) => {
+  const store = await openStore(t);
+  await store.registerDevice('mb', 'https://ark.example', 'auth', token(0), 'topic');
+  await store.registerDevice('mb', 'https://ark.example', 'auth', token(1), 'topic');
+  await store.set('mb', 5);
+  await store.setAuthWakeState('mb', { authExpiresAt: 1, preAttempts: 1, postAttempts: 0, lastSentAt: 2 });
+
+  await store.unregisterDevice('mb', token(0));
+  assert.deepEqual(await mailboxRowCounts(store, 'mb'), {
+    device_registration: 1, mailbox_registration: 1, mailbox_checkpoint: 1, auth_wake: 1
+  });
+
+  assert.equal(await store.unregisterDevice('mb', token(1)), 1);
+  assert.deepEqual(await mailboxRowCounts(store, 'mb'), NO_ROWS);
+});
+
+test('a worker finishing a message cannot bring a deleted mailbox back', async (t) => {
+  const store = await openStore(t);
+  await store.registerDevice('mb', 'https://ark.example', 'auth', token(0), 'topic');
+  await store.unregisterDevice('mb', token(0));
+
+  await store.recordMailboxMessage('mb', 9, { vtxoCount: 1, totalSats: 1000 }, 'arkoor');
+  await store.set('mb', 10);
+  await store.setAuthWakeState('mb', { authExpiresAt: 1, preAttempts: 1, postAttempts: 0, lastSentAt: 2 });
+
+  assert.deepEqual(await mailboxRowCounts(store, 'mb'), NO_ROWS);
+  // Aggregate counters still count the message.
+  assert.equal((await store.getStats())[STAT_KEYS.lifetimeMailboxMessagesReceived], 1);
+});
+
+test('getCheckpoint tells a mailbox never read apart from one at checkpoint 0', async (t) => {
+  const store = await openStore(t);
+  await store.registerDevice('mb', 'https://ark.example', 'auth', token(0), 'topic');
+  assert.equal(await store.getCheckpoint('mb'), null);
+  assert.equal(await store.get('mb'), 0);
+
+  await store.set('mb', 0);
+  assert.equal(await store.getCheckpoint('mb'), 0);
+  await store.set('mb', 42);
+  assert.equal(await store.getCheckpoint('mb'), 42);
+});
+
+test('mailboxes registered before silent catch-up existed keep notifying', async (t) => {
+  const store = await openStore(t);
+  await store.registerDevice('mb', 'https://ark.example', 'auth', token(0), 'topic');
+  await store.run('PRAGMA user_version = 0');
+
+  await store.init();
+  assert.equal(await store.getCheckpoint('mb'), 0);
+
+  // Runs once: a mailbox registered after the upgrade is left to catch up.
+  await store.registerDevice('mb2', 'https://ark.example', 'auth', token(1), 'topic');
+  await store.init();
+  assert.equal(await store.getCheckpoint('mb2'), null);
+});
+
+test('deleteMailbox leaves a mailbox whose authorization was renewed meanwhile', async (t) => {
+  const store = await openStore(t);
+  await store.registerDevice('mb', 'https://ark.example', 'old', token(0), 'topic');
+  await store.registerDevice('mb', 'https://ark.example', 'new', token(0), 'topic');
+
+  assert.equal(await store.deleteMailbox('mb', 'old'), false);
+  assert.equal(await store.countDevices('mb'), 1);
+
+  await store.set('mb', 3);
+  assert.equal(await store.deleteMailbox('mb', 'new'), true);
+  assert.deepEqual(await mailboxRowCounts(store, 'mb'), NO_ROWS);
+});
+
+test('deleteOrphans removes rows of mailboxes without devices', async (t) => {
+  const store = await openStore(t);
+  await store.registerDevice('kept', 'https://ark.example', 'auth', token(0), 'topic');
+  await store.set('kept', 1);
+  // What older versions left behind after the last device unregistered.
+  await store.run(`INSERT INTO mailbox_registration (mailbox_id, ark_addr, authorization_hex) VALUES ('old', 'https://ark.example', 'auth')`);
+  await store.run(`INSERT INTO mailbox_checkpoint (mailbox_id, checkpoint) VALUES ('old', 4), ('stray', 5)`);
+  await store.run(`INSERT INTO auth_wake (mailbox_id, auth_expires_at) VALUES ('old', 1)`);
+
+  assert.equal(await store.deleteOrphans(), 1);
+  assert.deepEqual(await mailboxRowCounts(store, 'old'), NO_ROWS);
+  assert.equal(await store.getCheckpoint('stray'), null);
+  assert.equal(await store.getCheckpoint('kept'), 1);
+  assert.equal(await store.countDevices('kept'), 1);
 });

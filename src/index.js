@@ -8,6 +8,7 @@ const grpc = require('@grpc/grpc-js');
 
 const { loadConfig } = require('./config');
 const { CheckpointStore, STAT_KEYS } = require('./checkpoint-store');
+const { RetentionJob } = require('./retention');
 const { ApnsSender, StaleDeviceTokenError } = require('./apns-sender');
 const { createClientFactory, readMailbox, subscribeMailbox, statusName } = require('./mailbox-client');
 const { decodeVtxoSats } = require('./vtxo-decoder');
@@ -485,7 +486,7 @@ async function sendMailboxNotificationToRecipients({
   let successfulSends = 0;
 
   if (recipients.length === 0) {
-    logger.warn({ mailboxId, checkpoint, messageType }, 'no registered devices, skipping APNs send');
+    logger.warn({ mailbox: mailboxPrefix(mailboxId), checkpoint, messageType }, 'no registered devices, skipping APNs send');
     events.record({
       category: 'apns',
       name: 'skipped_no_devices',
@@ -499,7 +500,7 @@ async function sendMailboxNotificationToRecipients({
 
   if (config.dryRun) {
     logger.info(
-      { checkpoint, mailboxId, messageType, recipientCount: recipients.length },
+      { checkpoint, mailbox: mailboxPrefix(mailboxId), messageType, recipientCount: recipients.length },
       'dry-run enabled, skipping APNs send'
     );
     events.record({
@@ -622,7 +623,7 @@ async function processMailboxMessage(message, mailboxId, sender, store, config) 
   const resolvedMessage = resolveMailboxMessage(message);
   if (!resolvedMessage) {
     logger.warn(
-      { checkpoint, mailboxId, messageKeys: getMailboxMessageKeys(message) },
+      { checkpoint, mailbox: mailboxPrefix(mailboxId), messageKeys: getMailboxMessageKeys(message) },
       'unsupported mailbox message type, advancing checkpoint without APNs send'
     );
     events.record({
@@ -645,7 +646,7 @@ async function processMailboxMessage(message, mailboxId, sender, store, config) 
   if (decodeErrors.length > 0) {
     const message = clipText(decodeErrors[0].message, 300);
     logger.warn(
-      { checkpoint, mailboxId, messageType: resolvedMessage.type, failed: decodeErrors.length, err: decodeErrors[0] },
+      { checkpoint, mailbox: mailboxPrefix(mailboxId), messageType: resolvedMessage.type, failed: decodeErrors.length, err: decodeErrors[0] },
       'could not decode VTXO amount; sats stats will undercount'
     );
     events.record({
@@ -711,7 +712,7 @@ const WORKER_STATE_OUTCOMES = Object.freeze({
 });
 
 class MailboxWorker {
-  constructor({ mailboxId, arkAddr, authorizationHex, store, sender, clientFactory, config }) {
+  constructor({ mailboxId, arkAddr, authorizationHex, store, sender, clientFactory, config, onUnregistered }) {
     this.mailboxId = mailboxId;
     this.arkAddr = arkAddr;
     this.authorizationHex = authorizationHex;
@@ -719,7 +720,8 @@ class MailboxWorker {
     this._sender = sender;
     this._clientFactory = clientFactory;
     this._config = config;
-    this._log = logger.child({ mailboxId, arkAddr });
+    this._onUnregistered = onUnregistered || (() => {});
+    this._log = logger.child({ mailbox: mailboxPrefix(mailboxId), arkAddr });
     this._stopped = false;
     this._loopPromise = null;
     this._currentCall = null;
@@ -792,6 +794,9 @@ class MailboxWorker {
     await processMailboxMessage(message, this.mailboxId, this._sender, this._store, this._config);
     this._messagesProcessed += 1;
     this._lastMessageAt = Date.now();
+    // APNs may have just reported the last device as uninstalled, which
+    // deletes the mailbox. Then nobody is left to notify.
+    if (!await this._store.getMailbox(this.mailboxId)) this._onUnregistered();
   }
 
   start() {
@@ -886,26 +891,44 @@ class MailboxWorker {
     this._loopPromise = null;
   }
 
+  // Without a stored checkpoint the relay has never read this mailbox (it is
+  // new, or was deleted and registered again), so it can't tell which messages
+  // the user has already seen. The Ark server keeps a mailbox's whole history,
+  // so it skips to the end without pushing anything. The user is in the app at
+  // that point anyway, having just registered. Only once the end is reached is
+  // the checkpoint stored: a catch-up cut short starts over silently.
   async _backfill(client) {
-    let checkpoint = await this._store.get(this.mailboxId);
+    const stored = await this._store.getCheckpoint(this.mailboxId);
+    const catchUp = stored === null;
+    let checkpoint = stored ?? 0;
+    let skipped = 0;
 
     for (;;) {
       const response = await readMailbox(client, this._makeRequest(checkpoint));
       const messages = response.messages || [];
 
-      if (messages.length === 0 && !response.have_more) {
-        return checkpoint;
-      }
-
       for (const message of messages) {
-        await this._processMessage(message);
+        if (catchUp) skipped += 1;
+        else await this._processMessage(message);
         checkpoint = Number(message.checkpoint || checkpoint);
       }
 
-      if (!response.have_more) {
-        return checkpoint;
-      }
+      if (!response.have_more) break;
     }
+
+    if (catchUp) {
+      await this._store.set(this.mailboxId, checkpoint);
+      this._log.info({ skipped, checkpoint }, 'caught up with mailbox history without sending pushes');
+      events.record({
+        category: 'mailbox',
+        name: 'catch_up',
+        outcome: 'info',
+        mailboxId: this.mailboxId,
+        arkAddr: this.arkAddr,
+        detail: { skipped, checkpoint }
+      });
+    }
+    return checkpoint;
   }
 
   async _subscribe(client, checkpoint) {
@@ -1007,7 +1030,7 @@ class WorkerManager {
     for (const m of mailboxes) {
       // Registered before the allowlist existed, or since removed from it.
       if (!isAllowedArkAddr(m.ark_addr, this._config.arkAddrAllowlist)) {
-        logger.warn({ mailboxId: m.mailbox_id, arkAddr: m.ark_addr }, 'not starting worker: ark_addr is not in ARK_ADDR_ALLOWLIST');
+        logger.warn({ mailbox: mailboxPrefix(m.mailbox_id), arkAddr: m.ark_addr }, 'not starting worker: ark_addr is not in ARK_ADDR_ALLOWLIST');
         continue;
       }
       const count = await this._store.countDevices(m.mailbox_id);
@@ -1037,7 +1060,7 @@ class WorkerManager {
       worker.stop();
       this._workers.delete(mailboxId);
       metricWorkers.set(this._workers.size);
-      logger.info({ mailboxId }, 'stopped mailbox worker (no devices remaining)');
+      logger.info({ mailbox: mailboxPrefix(mailboxId) }, 'stopped mailbox worker');
     }
   }
 
@@ -1057,11 +1080,14 @@ class WorkerManager {
       store: this._store,
       sender: this._sender,
       clientFactory: this._clientFactory,
-      config: this._config
+      config: this._config,
+      onUnregistered: () => {
+        if (this._workers.get(mailboxId) === worker) this.stopWorker(mailboxId);
+      }
     });
     this._workers.set(mailboxId, worker);
     worker.start();
-    logger.info({ mailboxId, arkAddr }, 'started mailbox worker');
+    logger.info({ mailbox: mailboxPrefix(mailboxId), arkAddr }, 'started mailbox worker');
   }
 }
 
@@ -1218,7 +1244,7 @@ function startHttpServer({ port, config, store, workerManager, clientFactory }) 
       });
     } catch (err) {
       logger.warn(
-        { err, mailboxId: res.locals.mailboxId, arkAddr: res.locals.arkAddr },
+        { err, mailbox: mailboxPrefix(res.locals.mailboxId), arkAddr: res.locals.arkAddr },
         'registration request rejected'
       );
       recordIfDbError(err, res.locals.mailboxId, 'register');
@@ -1268,7 +1294,7 @@ function startHttpServer({ port, config, store, workerManager, clientFactory }) 
         total_devices: remaining
       });
     } catch (err) {
-      logger.warn({ err, mailboxId: res.locals.mailboxId }, 'unregister request failed');
+      logger.warn({ err, mailbox: mailboxPrefix(res.locals.mailboxId) }, 'unregister request failed');
       recordIfDbError(err, res.locals.mailboxId, 'unregister');
       res.locals.eventDetail = { message: clipText(err.message || err, 300) };
       return rejectRequest(res, 500, 'internal_error', { error: 'unregister failed', detail: String(err.message || err) });
@@ -1297,7 +1323,7 @@ function startHttpServer({ port, config, store, workerManager, clientFactory }) 
         }))
       });
     } catch (err) {
-      logger.warn({ err, mailboxId: res.locals.mailboxId }, 'list registrations failed');
+      logger.warn({ err, mailbox: mailboxPrefix(res.locals.mailboxId) }, 'list registrations failed');
       res.locals.eventDetail = { message: clipText(err.message || err, 300) };
       return rejectRequest(res, 500, 'internal_error', { error: 'failed to list registrations', detail: String(err.message || err) });
     }
@@ -1382,7 +1408,7 @@ async function run() {
     config,
     onStaleDevice: async (mailboxId, deviceToken, reason) => {
       logger.warn(
-        { mailboxId, deviceTokenSuffix: deviceToken.slice(-8), reason },
+        { mailbox: mailboxPrefix(mailboxId), deviceTokenSuffix: deviceToken.slice(-8), reason },
         'removing stale APNs device token (auth wake)'
       );
       const removed = await store.unregisterDevice(mailboxId, deviceToken, STAT_KEYS.lifetimeStaleDeviceRemovals);
@@ -1397,6 +1423,9 @@ async function run() {
   });
   authWake.start();
 
+  const retention = new RetentionJob({ store, workerManager, events, logger, config });
+  retention.start();
+
   startHttpServer({ port: config.metricsPort, config, store, workerManager, clientFactory });
 
   let shuttingDown = false;
@@ -1404,6 +1433,7 @@ async function run() {
     if (shuttingDown) return;
     shuttingDown = true;
     authWake.stop();
+    retention.stop();
     workerManager.stopAll();
     sender.shutdown();
     store.close();

@@ -1,5 +1,6 @@
 const { parseAuthorizationExpiryMs } = require('./mailbox-auth');
 const { StaleDeviceTokenError } = require('./apns-sender');
+const { mailboxPrefix } = require('./event-log');
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
@@ -176,7 +177,7 @@ class AuthWakeScheduler {
             status: err.apnsStatus,
             message: String(err.message || err).slice(0, 300)
           });
-          this._log.error({ err, mailboxId }, 'failed to send auth wake push');
+          this._log.error({ err, mailbox: mailboxPrefix(mailboxId) }, 'failed to send auth wake push');
         }
       }
     }

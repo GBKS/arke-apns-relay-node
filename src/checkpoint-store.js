@@ -75,6 +75,18 @@ class CheckpointStore {
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
     `);
+
+    // A mailbox without a checkpoint row is caught up silently on its first
+    // backfill (see getCheckpoint). Mailboxes registered before that existed
+    // but never sent a message have no row yet, and must keep notifying.
+    const { user_version: schemaVersion } = await this._get('PRAGMA user_version');
+    if (schemaVersion < 1) {
+      await this.run(`
+        INSERT OR IGNORE INTO mailbox_checkpoint (mailbox_id, checkpoint)
+        SELECT mailbox_id, 0 FROM mailbox_registration
+      `);
+      await this.run('PRAGMA user_version = 1');
+    }
   }
 
   get(mailboxId) {
@@ -88,6 +100,14 @@ class CheckpointStore {
         }
       );
     });
+  }
+
+  // Like get(), but null when the relay has never read this mailbox: it is new,
+  // or was deleted and registered again. Then the relay can't tell which of the
+  // mailbox's messages the user has already seen.
+  async getCheckpoint(mailboxId) {
+    const row = await this._get('SELECT checkpoint FROM mailbox_checkpoint WHERE mailbox_id = ?', [mailboxId]);
+    return row ? Number(row.checkpoint) : null;
   }
 
   set(mailboxId, checkpoint) {
@@ -173,6 +193,9 @@ class CheckpointStore {
     });
   }
 
+  // Removing a mailbox's last device deletes everything stored about the
+  // mailbox, its authorization included: without a device there is nobody to
+  // notify, and the relay shouldn't keep read access it has no use for.
   unregisterDevice(mailboxId, deviceToken, statKey = null) {
     return this._transaction(async () => {
       const result = await this._unregisterDevice(mailboxId, deviceToken);
@@ -180,8 +203,51 @@ class CheckpointStore {
       if (removed > 0 && statKey) {
         await this._incrementStats({ [statKey]: removed });
       }
+      const remaining = await this._get('SELECT 1 FROM device_registration WHERE mailbox_id = ? LIMIT 1', [mailboxId]);
+      if (!remaining) {
+        await this._deleteMailbox(mailboxId);
+      }
       return removed;
     });
+  }
+
+  // Deletes the mailbox and its devices, but only while its stored
+  // authorization is still `authorizationHex`, so a registration that renewed
+  // it in the meantime wins. Returns whether anything was deleted.
+  deleteMailbox(mailboxId, authorizationHex) {
+    return this._transaction(async () => {
+      const result = await this.run(
+        'DELETE FROM mailbox_registration WHERE mailbox_id = ? AND authorization_hex = ?',
+        [mailboxId, authorizationHex]
+      );
+      if ((result.changes || 0) === 0) return false;
+      await this._deleteMailbox(mailboxId);
+      return true;
+    });
+  }
+
+  // Rows that belong to no registered mailbox with a device: left behind by
+  // versions that only deleted the device row on unregister.
+  deleteOrphans() {
+    return this._transaction(async () => {
+      const mailboxes = await this.run(
+        `DELETE FROM mailbox_registration
+         WHERE NOT EXISTS (SELECT 1 FROM device_registration d WHERE d.mailbox_id = mailbox_registration.mailbox_id)`
+      );
+      for (const table of ['device_registration', 'mailbox_checkpoint', 'auth_wake']) {
+        await this.run(
+          `DELETE FROM ${table}
+           WHERE NOT EXISTS (SELECT 1 FROM mailbox_registration m WHERE m.mailbox_id = ${table}.mailbox_id)`
+        );
+      }
+      return mailboxes.changes || 0;
+    });
+  }
+
+  async _deleteMailbox(mailboxId) {
+    for (const table of ['device_registration', 'mailbox_registration', 'mailbox_checkpoint', 'auth_wake']) {
+      await this.run(`DELETE FROM ${table} WHERE mailbox_id = ?`, [mailboxId]);
+    }
   }
 
   _setMailbox(mailboxId, arkAddr, authorizationHex) {
@@ -263,13 +329,13 @@ class CheckpointStore {
   setAuthWakeState(mailboxId, { authExpiresAt, preAttempts, postAttempts, lastSentAt }) {
     return this._exclusive(() => this.run(
       `INSERT INTO auth_wake (mailbox_id, auth_expires_at, pre_attempts, post_attempts, last_sent_at)
-       VALUES (?, ?, ?, ?, ?)
+       SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM mailbox_registration WHERE mailbox_id = ?)
        ON CONFLICT(mailbox_id) DO UPDATE SET
          auth_expires_at = excluded.auth_expires_at,
          pre_attempts = excluded.pre_attempts,
          post_attempts = excluded.post_attempts,
          last_sent_at = excluded.last_sent_at`,
-      [mailboxId, authExpiresAt, preAttempts, postAttempts, lastSentAt]
+      [mailboxId, authExpiresAt, preAttempts, postAttempts, lastSentAt, mailboxId]
     ));
   }
 
@@ -357,6 +423,15 @@ class CheckpointStore {
     });
   }
 
+  _get(sql, args = []) {
+    return new Promise((resolve, reject) => {
+      this.db.get(sql, args, (err, row) => {
+        if (err) return reject(err);
+        resolve(row || null);
+      });
+    });
+  }
+
   run(sql, args = []) {
     return new Promise((resolve, reject) => {
       this.db.run(sql, args, function runResult(err) {
@@ -366,16 +441,19 @@ class CheckpointStore {
     });
   }
 
+  // A worker can still be finishing a message when its mailbox is deleted, so
+  // writes for a mailbox that is no longer registered are dropped rather than
+  // bringing its rows back. The same goes for setAuthWakeState().
   _setCheckpoint(mailboxId, checkpoint) {
     return this.run(
       `
       INSERT INTO mailbox_checkpoint(mailbox_id, checkpoint, updated_at)
-      VALUES (?, ?, CURRENT_TIMESTAMP)
+      SELECT ?, ?, CURRENT_TIMESTAMP WHERE EXISTS (SELECT 1 FROM mailbox_registration WHERE mailbox_id = ?)
       ON CONFLICT(mailbox_id) DO UPDATE SET
         checkpoint = excluded.checkpoint,
         updated_at = CURRENT_TIMESTAMP
       `,
-      [mailboxId, checkpoint]
+      [mailboxId, checkpoint, mailboxId]
     );
   }
 
