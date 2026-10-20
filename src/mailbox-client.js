@@ -70,17 +70,20 @@ function createCallReportInterceptor(arkAddr, onCall) {
   };
 }
 
+// `longs: String` keeps uint64 checkpoints exact (see src/checkpoint.js).
+const PROTO_LOADER_OPTIONS = Object.freeze({
+  keepCase: true,
+  longs: String,
+  enums: String,
+  defaults: true,
+  oneofs: true
+});
+
 // Returns a factory function `getClient(arkAddr)` that creates (and caches)
 // one gRPC channel per unique Ark server address. If `onCall` is given it is
 // invoked once per finished RPC (see `createCallReportInterceptor`).
 function createClientFactory(protoPath, { onCall } = {}) {
-  const packageDef = protoLoader.loadSync(protoPath, {
-    keepCase: true,
-    longs: String,
-    enums: String,
-    defaults: true,
-    oneofs: true
-  });
+  const packageDef = protoLoader.loadSync(protoPath, PROTO_LOADER_OPTIONS);
   const loaded = grpc.loadPackageDefinition(packageDef);
   const mailbox = loaded.mailbox_server;
   if (!mailbox || !mailbox.MailboxService) {
@@ -135,6 +138,7 @@ function subscribeMailbox(client, req) {
 }
 
 module.exports = {
+  PROTO_LOADER_OPTIONS,
   createClientFactory,
   statusName,
   readMailbox,

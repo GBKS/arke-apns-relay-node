@@ -37,6 +37,28 @@ function optionalString(raw) {
 // rollups, and live worker state. Mounted only when ADMIN_API_TOKEN is set.
 // This deliberately does not accept RELAY_API_TOKEN, which ships inside the
 // iOS app and so can't be treated as a secret.
+// What is keeping mailbox authorizations alive: wake pushes sent, and
+// registrations by the trigger the app reported for them. Only registration
+// events count: the category also holds `expired_deleted` from the retention
+// job, which would otherwise show up as registrations without a trigger.
+const REFRESH_EVENT_NAMES = new Set(['refresh', 'refresh_after_wake']);
+
+function summarizeAuthRefresh(totals) {
+  const authRefresh = { wakes_sent: 0, wakes_failed: 0, refreshes_after_wake: 0, refreshes_by_trigger: {} };
+  for (const row of totals) {
+    if (row.category === 'apns' && row.name === 'auth_wake') {
+      if (row.outcome === 'ok') authRefresh.wakes_sent += row.count;
+      if (row.outcome === 'fail') authRefresh.wakes_failed += row.count;
+    }
+    if (row.category === 'registration' && REFRESH_EVENT_NAMES.has(row.name)) {
+      if (row.name === 'refresh_after_wake') authRefresh.refreshes_after_wake += row.count;
+      const trigger = row.code || 'unspecified';
+      authRefresh.refreshes_by_trigger[trigger] = (authRefresh.refreshes_by_trigger[trigger] || 0) + row.count;
+    }
+  }
+  return authRefresh;
+}
+
 function createAdminRouter({
   config,
   events,
@@ -110,26 +132,14 @@ function createAdminRouter({
 
     const categories = {};
     let topFailures = [];
-    // What is keeping mailbox authorizations alive: wake pushes sent, and
-    // registrations by the trigger the app reported for them.
-    const authRefresh = { wakes_sent: 0, wakes_failed: 0, refreshes_after_wake: 0, refreshes_by_trigger: {} };
+    let authRefresh = summarizeAuthRefresh([]);
     if (events.enabled) {
       const totals = await events.queryTotals({ fromMs: now - hours * HOUR_MS });
       for (const row of totals) {
         const bucket = categories[row.category] || (categories[row.category] = { ok: 0, fail: 0, info: 0 });
         bucket[row.outcome] = (bucket[row.outcome] || 0) + row.count;
       }
-      for (const row of totals) {
-        if (row.category === 'apns' && row.name === 'auth_wake') {
-          if (row.outcome === 'ok') authRefresh.wakes_sent += row.count;
-          if (row.outcome === 'fail') authRefresh.wakes_failed += row.count;
-        }
-        if (row.category === 'registration') {
-          if (row.name === 'refresh_after_wake') authRefresh.refreshes_after_wake += row.count;
-          const trigger = row.code || 'unspecified';
-          authRefresh.refreshes_by_trigger[trigger] = (authRefresh.refreshes_by_trigger[trigger] || 0) + row.count;
-        }
-      }
+      authRefresh = summarizeAuthRefresh(totals);
       for (const bucket of Object.values(categories)) {
         const judged = bucket.ok + bucket.fail;
         bucket.failure_rate = judged > 0 ? Number((bucket.fail / judged).toFixed(4)) : 0;
@@ -230,4 +240,4 @@ function createAdminRouter({
   return router;
 }
 
-module.exports = { createAdminRouter, ADMIN_API_PATH };
+module.exports = { createAdminRouter, summarizeAuthRefresh, ADMIN_API_PATH };
