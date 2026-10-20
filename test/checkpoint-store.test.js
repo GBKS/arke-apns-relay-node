@@ -186,3 +186,29 @@ test('deleteOrphans removes rows of mailboxes without devices', async (t) => {
   assert.equal(await store.getCheckpoint('kept'), 1);
   assert.equal(await store.countDevices('kept'), 1);
 });
+
+test('authorization_since only moves when the authorization changes', async (t) => {
+  const store = await openStore(t);
+  const since = async () => (await store._get('SELECT authorization_since FROM mailbox_registration WHERE mailbox_id = ?', ['mb'])).authorization_since;
+
+  await store.registerDevice('mb', 'https://ark.example', 'first', token(0), 'topic');
+  await store.run('UPDATE mailbox_registration SET authorization_since = 1000');
+  await store.registerDevice('mb', 'https://ark.example', 'first', token(1), 'topic');
+  assert.equal(await since(), 1000);
+
+  await store.registerDevice('mb', 'https://ark.example', 'second', token(0), 'topic');
+  assert.ok(await since() > 1000);
+  assert.ok((await store.getMailboxesWithDevices())[0].authorization_since > 1000);
+});
+
+test('existing registrations get authorization_since from their last registration', async (t) => {
+  const store = await openStore(t);
+  await store.registerDevice('mb', 'https://ark.example', 'auth', token(0), 'topic');
+  // A database from before the column existed.
+  await store.run('ALTER TABLE mailbox_registration DROP COLUMN authorization_since');
+  await store.run(`UPDATE mailbox_registration SET updated_at = '2026-09-26 12:00:00'`);
+
+  await store.init();
+  const row = await store._get('SELECT authorization_since FROM mailbox_registration');
+  assert.equal(row.authorization_since, Date.UTC(2026, 8, 26, 12));
+});
