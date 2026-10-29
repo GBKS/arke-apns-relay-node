@@ -8,12 +8,14 @@ const {
   createRateLimiter
 } = require('../src/guards');
 
-test('default allowlist accepts the Second servers and nothing else', () => {
+test('default allowlist accepts the known servers and nothing else', () => {
   const allowlist = parseArkAddrAllowlist(undefined);
   assert.equal(isAllowedArkAddr('https://ark.second.tech', allowlist), true);
   assert.equal(isAllowedArkAddr('https://ark.second.tech/', allowlist), true);
   assert.equal(isAllowedArkAddr('https://ARK.second.tech', allowlist), true);
   assert.equal(isAllowedArkAddr('https://ark.signet.2nd.dev', allowlist), true);
+  assert.equal(isAllowedArkAddr('https://ark.coinos.io', allowlist), true);
+  assert.equal(isAllowedArkAddr('https://ark.zappin.online', allowlist), true);
 
   assert.equal(isAllowedArkAddr('https://evil.example', allowlist), false);
   assert.equal(isAllowedArkAddr('http://ark.second.tech', allowlist), false);

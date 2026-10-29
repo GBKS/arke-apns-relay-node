@@ -5,7 +5,7 @@ const net = require('net');
 // anyone could point the relay at a server of their own: an unbounded number
 // of workers and gRPC channels, connections into private networks, and pushes
 // sent with our APNs key whenever that server says so.
-const DEFAULT_ARK_ADDR_ALLOWLIST = 'https://ark.second.tech,https://ark.signet.2nd.dev';
+const DEFAULT_ARK_ADDR_ALLOWLIST = 'https://ark.second.tech,https://ark.signet.2nd.dev,https://ark.coinos.io,https://ark.zappin.online';
 
 // Returns null when every address is allowed ("*"), otherwise a Set of origins.
 function parseArkAddrAllowlist(value) {
