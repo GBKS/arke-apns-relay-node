@@ -35,7 +35,9 @@ If you prefer not to copy/paste the full runbook manually, use the bootstrap scr
 ./scripts/setup-relay-server.sh
 ```
 
-It prompts for the required values, uploads your `.p8`, and configures node, systemd, nginx, optional certbot, and optional firewall rules over SSH.
+It prompts for the required values, uploads your `.p8`, and configures node, systemd, Caddy (with automatic HTTPS), and optional firewall rules over SSH.
+
+The script uses Caddy, not nginx. On a server where nginx is already running (like the faucet server this guide assumes), it stops without changing anything, because Caddy needs ports 80 and 443. In that case, follow the manual steps below instead.
 
 By default, it uses `./protos/mailbox_server.proto` and `./protos/core.proto` from this repo if they exist. If they are missing, it prompts you for local proto file paths.
 

@@ -67,7 +67,7 @@ main() {
 
 	echo
 	echo "About to remove the remote relay deployment on $SSH_HOST"
-	echo "This will stop the service, remove nginx and systemd configuration, delete $REMOTE_BASE, and remove the arke-relay user if present."
+	echo "This will stop the service, remove the web server (Caddy or nginx) and systemd configuration, delete $REMOTE_BASE, and remove the arke-relay user if present."
 
 	prompt_yes_no CONFIRM_UNINSTALL "Proceed with uninstall?" "no"
 	if [[ "$CONFIRM_UNINSTALL" != "1" ]]; then
@@ -93,6 +93,26 @@ sudo systemctl disable --now arke-apns-relay 2>/dev/null || true
 sudo rm -f /etc/systemd/system/arke-apns-relay.service
 sudo systemctl daemon-reload
 
+# Caddy (current setup): drop this domain's top-level site block.
+CADDYFILE="/etc/caddy/Caddyfile"
+if sudo test -f "$CADDYFILE" && sudo grep -qE "^${DOMAIN//./\\.}[[:space:]]*\{" "$CADDYFILE"; then
+	CADDY_BACKUP="$CADDYFILE.bak.$(date +%Y%m%d%H%M%S)"
+	sudo cp -p "$CADDYFILE" "$CADDY_BACKUP"
+	sudo awk -v domain="$DOMAIN" '
+		!skip && $1 == domain && $NF == "{" { skip = 1; next }
+		skip { if ($0 ~ /^}/) skip = 0; next }
+		{ print }
+	' "$CADDY_BACKUP" | sudo tee "$CADDYFILE" > /dev/null
+	if sudo caddy validate --config "$CADDYFILE" --adapter caddyfile > /dev/null; then
+		sudo systemctl reload caddy || true
+		echo "Removed $DOMAIN from $CADDYFILE (previous file saved as $CADDY_BACKUP)."
+	else
+		sudo cp -p "$CADDY_BACKUP" "$CADDYFILE"
+		echo "Warning: Caddy rejected the Caddyfile without $DOMAIN; restored it. Remove the site block by hand." >&2
+	fi
+fi
+
+# nginx (older setups).
 sudo rm -f "/etc/nginx/sites-enabled/$DOMAIN"
 sudo rm -f "/etc/nginx/sites-available/$DOMAIN"
 

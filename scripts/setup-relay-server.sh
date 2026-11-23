@@ -111,11 +111,9 @@ main() {
     exit 1
   fi
 
-  prompt_yes_no INSTALL_CERT "Run certbot nginx setup now?" "yes"
-  CERTBOT_EMAIL=""
-  if [[ "$INSTALL_CERT" == "1" ]]; then
-    prompt_required CERTBOT_EMAIL "Email for certbot registration: "
-  fi
+  echo "Caddy will serve the relay over HTTPS and get its certificate automatically."
+  echo "Point $DOMAIN's DNS at the server before running this, or the certificate can't be issued."
+  echo
 
   prompt_yes_no CONFIGURE_UFW "Configure UFW rules (recommended)?" "yes"
 
@@ -125,7 +123,7 @@ main() {
   echo "Save this value. You will need it for /v1 API calls."
   echo
 
-  prompt_yes_no ENABLE_ADMIN_API "Expose the read-only admin API (/insights/v1, event log + worker state) through nginx?" "yes"
+  prompt_yes_no ENABLE_ADMIN_API "Expose the read-only admin API (/insights/v1, event log + worker state) through Caddy?" "yes"
   ADMIN_API_TOKEN=""
   if [[ "$ENABLE_ADMIN_API" == "1" ]]; then
     ADMIN_API_TOKEN="$(openssl rand -hex 32)"
@@ -165,7 +163,7 @@ main() {
 
   echo "Running remote setup..."
   ssh "$ssh_target" bash -s -- \
-    "$DOMAIN" "$REPO_URL" "$REMOTE_BASE" "$APNS_KEY_ID" "$APNS_TEAM_ID" "$APNS_TOPIC" "$APNS_PRODUCTION" "$RELAY_API_TOKEN" "$INSTALL_CERT" "$CERTBOT_EMAIL" "$CONFIGURE_UFW" "$remote_proto_tmp" "$remote_core_proto_tmp" "$remote_key_tmp" "$ENABLE_ADMIN_API" "$ADMIN_API_TOKEN" <<'REMOTE_SCRIPT'
+    "$DOMAIN" "$REPO_URL" "$REMOTE_BASE" "$APNS_KEY_ID" "$APNS_TEAM_ID" "$APNS_TOPIC" "$APNS_PRODUCTION" "$RELAY_API_TOKEN" "$CONFIGURE_UFW" "$remote_proto_tmp" "$remote_core_proto_tmp" "$remote_key_tmp" "$ENABLE_ADMIN_API" "$ADMIN_API_TOKEN" <<'REMOTE_SCRIPT'
 set -euo pipefail
 
 DOMAIN="$1"
@@ -176,24 +174,44 @@ APNS_TEAM_ID="$5"
 APNS_TOPIC="$6"
 APNS_PRODUCTION="$7"
 RELAY_API_TOKEN="$8"
-INSTALL_CERT="$9"
-CERTBOT_EMAIL="${10}"
-CONFIGURE_UFW="${11}"
-REMOTE_PROTO_TMP="${12}"
-REMOTE_CORE_PROTO_TMP="${13}"
-REMOTE_KEY_TMP="${14}"
-ENABLE_ADMIN_API="${15}"
-ADMIN_API_TOKEN="${16:-}"
+CONFIGURE_UFW="$9"
+REMOTE_PROTO_TMP="${10}"
+REMOTE_CORE_PROTO_TMP="${11}"
+REMOTE_KEY_TMP="${12}"
+ENABLE_ADMIN_API="${13}"
+ADMIN_API_TOKEN="${14:-}"
+CADDYFILE="/etc/caddy/Caddyfile"
 
 if ! command -v sudo >/dev/null 2>&1; then
   echo "sudo is required on the remote server" >&2
   exit 1
 fi
 
+# Caddy needs ports 80 and 443. If nginx already holds them (e.g. for other
+# sites on this server), stop before changing anything.
+if systemctl is-active --quiet nginx 2>/dev/null; then
+  echo "nginx is running on this server and holds ports 80/443, which Caddy needs." >&2
+  echo "Move its sites to Caddy and stop nginx first, or set up the relay by hand" >&2
+  echo "(BEGINNER_SERVER_SETUP.md). Nothing was changed." >&2
+  exit 1
+fi
+
 export DEBIAN_FRONTEND=noninteractive
 
 sudo apt update
-sudo apt install -y curl git nginx sqlite3 ufw
+sudo apt install -y curl git gnupg sqlite3 ufw
+
+# Caddy from its official repository; Ubuntu's own package lags far behind.
+if ! command -v caddy >/dev/null 2>&1; then
+  sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https
+  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+    | sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+    | sudo tee /etc/apt/sources.list.d/caddy-stable.list > /dev/null
+  sudo chmod o+r /usr/share/keyrings/caddy-stable-archive-keyring.gpg /etc/apt/sources.list.d/caddy-stable.list
+  sudo apt update
+  sudo apt install -y caddy
+fi
 
 if ! command -v node >/dev/null 2>&1; then
   curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
@@ -204,10 +222,6 @@ else
     curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
     sudo apt install -y nodejs
   fi
-fi
-
-if [[ "$INSTALL_CERT" == "1" ]]; then
-  sudo apt install -y certbot python3-certbot-nginx
 fi
 
 if ! id -u arke-relay >/dev/null 2>&1; then
@@ -292,59 +306,62 @@ EOF
 sudo systemctl daemon-reload
 sudo systemctl enable --now arke-apns-relay
 
-ADMIN_LOCATION_BLOCK=""
+# Only the relay's public paths are forwarded; everything else (including
+# /metrics) gets a 404. Caddy replaces any client-sent X-Forwarded-For, which
+# the relay's per-IP rate limits rely on (TRUST_PROXY=1).
+ADMIN_HANDLE_BLOCK=""
 if [[ "$ENABLE_ADMIN_API" == "1" ]]; then
-  ADMIN_LOCATION_BLOCK='
-    location /insights/v1/ {
-        proxy_pass http://127.0.0.1:9898;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+  ADMIN_HANDLE_BLOCK='
+    handle /insights/v1/* {
+        reverse_proxy localhost:9898
     }
 '
 fi
 
-sudo tee /etc/nginx/sites-available/$DOMAIN > /dev/null <<EOF
-server {
-    listen 80;
-    server_name $DOMAIN;
-
-    location /v1/ {
-        proxy_pass http://127.0.0.1:9898;
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
+SITE_BLOCK="$DOMAIN {
+    handle /v1/* {
+        reverse_proxy localhost:9898
+    }
+$ADMIN_HANDLE_BLOCK
+    handle /healthz {
+        reverse_proxy localhost:9898
     }
 
-$ADMIN_LOCATION_BLOCK
-    location = /healthz {
-        proxy_pass http://127.0.0.1:9898/healthz;
+    handle {
+        respond 404
     }
+}"
 
-    location = /metrics {
-        deny all;
-    }
-}
-EOF
+if sudo grep -qE "^${DOMAIN//./\\.}[[:space:]]*\{" "$CADDYFILE" 2>/dev/null; then
+  echo "$CADDYFILE already has a site block for $DOMAIN; leaving it alone."
+else
+  CADDY_BACKUP="$CADDYFILE.bak.$(date +%Y%m%d%H%M%S)"
+  sudo cp -p "$CADDYFILE" "$CADDY_BACKUP"
+  # The package ships a placeholder ":80" site that would also answer HTTP
+  # for this domain; replace it on a fresh install, otherwise append.
+  if sudo grep -q '^:80 {' "$CADDYFILE" && sudo grep -q '/usr/share/caddy' "$CADDYFILE" \
+     && ! sudo grep -qE '^[^:#[:space:]}][^[:space:]]*[[:space:]]*\{' "$CADDYFILE"; then
+    printf '%s\n' "$SITE_BLOCK" | sudo tee "$CADDYFILE" > /dev/null
+  else
+    printf '\n%s\n' "$SITE_BLOCK" | sudo tee -a "$CADDYFILE" > /dev/null
+  fi
 
-if [[ ! -L /etc/nginx/sites-enabled/$DOMAIN ]]; then
-  sudo ln -s /etc/nginx/sites-available/$DOMAIN /etc/nginx/sites-enabled/$DOMAIN
+  if ! sudo caddy validate --config "$CADDYFILE" --adapter caddyfile > /dev/null; then
+    sudo cp -p "$CADDY_BACKUP" "$CADDYFILE"
+    echo "Caddy rejected the new config, so the previous Caddyfile was restored." >&2
+    exit 1
+  fi
+  echo "Added $DOMAIN to $CADDYFILE (previous file saved as $CADDY_BACKUP)."
 fi
 
-sudo nginx -t
-sudo systemctl reload nginx
-
-if [[ "$INSTALL_CERT" == "1" ]]; then
-  sudo certbot --nginx --non-interactive --agree-tos --email "$CERTBOT_EMAIL" -d "$DOMAIN" --redirect
-fi
+sudo systemctl enable caddy
+sudo systemctl reload-or-restart caddy
 
 if [[ "$CONFIGURE_UFW" == "1" ]]; then
   sudo ufw allow OpenSSH
-  sudo ufw allow 'Nginx Full'
+  sudo ufw allow 80/tcp
+  sudo ufw allow 443/tcp
+  sudo ufw allow 443/udp
   sudo ufw deny 9898/tcp
   if sudo ufw status | grep -qi "Status: inactive"; then
     sudo ufw --force enable
