@@ -50,10 +50,10 @@ function summarizeRoundParticipationCompletedMessage(roundParticipationCompleted
 }
 
 function summarizeIncomingLightningPaymentMessage(incomingLightningPaymentMessage) {
-  const paymentHash =
+  const paymentHash = bytesToHex(
     incomingLightningPaymentMessage?.paymentHash
     || incomingLightningPaymentMessage?.payment_hash
-    || null;
+  );
   const amountMsat = Number(
     incomingLightningPaymentMessage?.amountMsat
     || incomingLightningPaymentMessage?.amount_msat
@@ -68,7 +68,7 @@ function summarizeIncomingLightningPaymentMessage(incomingLightningPaymentMessag
     stats: { vtxoCount: 0, totalSats: 0, lightningReceiveSats: amountSat },
     notification: {
       messageType: 'incomingLightningPayment',
-      hasPaymentHash: Boolean(paymentHash),
+      hasPaymentHash: paymentHash !== null,
       amountSat
     }
   };

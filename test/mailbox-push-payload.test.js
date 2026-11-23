@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const { ApnsSender } = require('../src/apns-sender');
 const {
   bytesToHex,
+  summarizeIncomingLightningPaymentMessage,
   summarizeLightningSendFinishedMessage
 } = require('../src/mailbox-messages');
 
@@ -81,4 +82,19 @@ test('other push types do not gain a payment_hash', () => {
     paymentHash: HASH_HEX
   });
   assert.equal('payment_hash' in wire(note), false);
+});
+
+test('incoming payment has_payment_hash reflects whether a hash was sent', () => {
+  const incomingPayload = (message) => {
+    const { notification } = summarizeIncomingLightningPaymentMessage(message);
+    return wire(buildNote(notification));
+  };
+
+  const withHash = incomingPayload({ payment_hash: HASH, amount_msat: '21000000' });
+  assert.equal(withHash.has_payment_hash, true);
+  assert.equal(withHash.amount_sat, 21000);
+
+  // proto-loader hands back an empty Buffer for an unset bytes field.
+  assert.equal(incomingPayload({ payment_hash: Buffer.alloc(0), amount_msat: '1000' }).has_payment_hash, false);
+  assert.equal(incomingPayload({ amount_msat: '1000' }).has_payment_hash, false);
 });
