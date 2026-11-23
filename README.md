@@ -118,7 +118,7 @@ If you want one command instead of manual copy/paste, run:
 ./scripts/setup-relay-server.sh
 ```
 
-It runs from your local machine, prompts for required values, uploads your `.p8` key and both `mailbox_server.proto` and its required `core.proto`, and configures the remote server over SSH (node, systemd, nginx, optional certbot, optional ufw).
+It runs from your local machine, prompts for required values, uploads your `.p8` key and both `mailbox_server.proto` and its required `core.proto`, and configures the remote server over SSH (node, systemd, Caddy with automatic HTTPS, optional ufw). Point the domain's DNS at the server first so Caddy can get a certificate. The script stops without changing anything if nginx is already running on the server, since Caddy needs ports 80 and 443.
 
 **Important:** You must have both `mailbox_server.proto` and `core.proto` (from the [`bark`](https://gitlab.com/ark-bitcoin/bark) repo) in the same directory before running the setup script. Both files are required for the relay to start.
 
@@ -175,7 +175,7 @@ Privacy: only the first 8 hex chars of a mailbox id and the last 8 of a device t
 
 ### Endpoints
 
-All require `Authorization: Bearer <ADMIN_API_TOKEN>` and are read-only. The path is deliberately not `/admin`, which every scanner probes; nginx should forward only the exact `/insights/v1/` prefix so that probe traffic never reaches the relay or its event log.
+All require `Authorization: Bearer <ADMIN_API_TOKEN>` and are read-only. The path is deliberately not `/admin`, which every scanner probes; the web server should forward only the exact `/insights/v1/` prefix so that probe traffic never reaches the relay or its event log.
 
 - `GET /insights/v1/summary?hours=24` — ok/fail/info totals and failure rate per category, top 20 failures, worker counts by state (plus `flapping`: 3+ consecutive failures), `auth_refresh` (`wakes_sent`, `wakes_failed`, `refreshes_after_wake`, `refreshes_by_trigger`), registered devices, lifetime counters, event log status.
 - `GET /insights/v1/workers?state=auth_paused` — live per-mailbox worker state: `state`, `state_since`, `consecutive_failures`, `connects`, `messages_processed`, `last_message_at`, `last_auth_refresh_at`, `auth_expires_at` (ms, `null` if the token couldn't be read), `last_error`, `next_retry_at` (`null` for `auth_expired`, which only a re-registration can end). Sorted worst first.
