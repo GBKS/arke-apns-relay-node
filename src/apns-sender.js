@@ -77,6 +77,7 @@ class ApnsSender {
     recoveryVtxoCount,
     amountSat,
     success,
+    paymentHash,
     mailboxId,
     deviceToken,
     topic
@@ -91,6 +92,7 @@ class ApnsSender {
       recoveryVtxoCount,
       amountSat,
       success,
+      paymentHash,
       mailboxId,
       topic
     });
@@ -180,6 +182,7 @@ class ApnsSender {
     recoveryVtxoCount,
     amountSat,
     success,
+    paymentHash,
     mailboxId,
     topic
   }) {
@@ -251,6 +254,11 @@ class ApnsSender {
           success: Boolean(success),
           mailbox_id: mailboxId
         };
+        // Lets the app match the push to the send it started. Left out when
+        // the Ark server sent no hash.
+        if (paymentHash) {
+          note.payload.payment_hash = paymentHash;
+        }
         note.alert = success
           ? { title: 'Payment sent', body: 'Your Lightning payment completed.' }
           : { title: 'Payment failed', body: 'Your Lightning payment did not go through.' };
